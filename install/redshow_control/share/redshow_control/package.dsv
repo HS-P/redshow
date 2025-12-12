@@ -1,0 +1,9 @@
+source;share/redshow_control/hook/pythonpath.ps1
+source;share/redshow_control/hook/pythonpath.dsv
+source;share/redshow_control/hook/pythonpath.sh
+source;share/redshow_control/hook/ament_prefix_path.ps1
+source;share/redshow_control/hook/ament_prefix_path.dsv
+source;share/redshow_control/hook/ament_prefix_path.sh
+source;../../build/redshow_control/share/redshow_control/hook/pythonpath_develop.ps1
+source;../../build/redshow_control/share/redshow_control/hook/pythonpath_develop.dsv
+source;../../build/redshow_control/share/redshow_control/hook/pythonpath_develop.sh
