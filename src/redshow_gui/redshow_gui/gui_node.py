@@ -35,6 +35,8 @@ class ROS2Node(Node):
         super().__init__('gui_node')
         self.cmd_pub = self.create_publisher(String,'redshow/cmd',10)
         self.joint_pub = self.create_publisher(Float64MultiArray,'redshow/joint_cmd',10)
+        self.feedback_sub = None  # 나중에 GUI 객체에서 콜백 설정
+        self.feedback_data = None  # 최신 피드백 데이터 저장
 
     def publish_cmd(self,cmd):
         msg=String()
@@ -45,6 +47,10 @@ class ROS2Node(Node):
         msg=Float64MultiArray()
         msg.data=joints
         self.joint_pub.publish(msg)
+    
+    def setup_feedback_subscriber(self, callback):
+        """피드백 subscriber 설정"""
+        self.feedback_sub = self.create_subscription(Float64MultiArray,'redshow/feedback',callback,10)
 
 
 # =========================
@@ -91,6 +97,7 @@ class MonitorGUI(QMainWindow):
         # ---- ROS2 ----
         rclpy.init()
         self.ros2_node=ROS2Node()
+        self.ros2_node.setup_feedback_subscriber(self.feedback_callback)
         threading.Thread(target=self.ros_spin,daemon=True).start()
 
         # ---- timers ----
@@ -109,6 +116,20 @@ class MonitorGUI(QMainWindow):
     def ros_spin(self):
         while rclpy.ok():
             rclpy.spin_once(self.ros2_node,timeout_sec=0.1)
+    
+    def feedback_callback(self, msg):
+        """피드백 데이터 콜백"""
+        if len(msg.data) != 23:
+            return
+        
+        # 피드백 데이터를 obs_buffer에 추가
+        for idx in range(23):
+            if idx in self.obs_buffer:
+                self.obs_buffer[idx].append(msg.data[idx])
+        
+        # time_buffer 업데이트
+        self.time_buffer.append(self.step)
+        self.step += 1
 
     # =========================
     # UI SETUP
@@ -388,11 +409,7 @@ class MonitorGUI(QMainWindow):
                     self.act_ax.autoscale_view()
                     self.act_canvas.draw()
         
-        # Observations 그래프 업데이트 (실제 데이터가 들어오면)
-        # 현재는 더미 데이터로 표시 (나중에 ROS2 subscriber로 받아서 업데이트)
-        # TODO: ROS2 subscriber에서 obs 데이터를 받아서 self.obs_buffer에 추가
-        
-        # 각 그룹별 그래프 업데이트
+        # 각 그룹별 그래프 업데이트 (피드백 데이터 사용)
         for group_name,group_info in self.obs_groups.items():
             if len(self.time_buffer)>0:
                 times=np.array(self.time_buffer)

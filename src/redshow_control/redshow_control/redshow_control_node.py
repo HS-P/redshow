@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import SingleThreadedExecutor
 from std_msgs.msg import String, Float64MultiArray
 import torch, time, threading
 from collections import deque
@@ -14,6 +15,8 @@ class BerkeleyControlNode(Node):
         # ────────────── ROS2 I/O 설정 ──────────────
         self.cmd_sub = self.create_subscription(String, 'redshow/cmd', self.cmd_callback, 10)
         self.manual_sub = self.create_subscription(Float64MultiArray, 'redshow/joint_cmd', self.manual_callback, 10)
+        # 피드백 데이터 publish
+        self.feedback_pub = self.create_publisher(Float64MultiArray, 'redshow/feedback', 10)
 
         # ────────────── 정책 로드 ──────────────
         import os
@@ -51,11 +54,13 @@ class BerkeleyControlNode(Node):
         # ────────────── 제어 관련 변수 ──────────────
         self.ENC_PER_RAD = 651.89865
         self.PI = 3.142
-        self.ACTOR_DT = 1.0 / 50.0
+        self.ACTOR_DT = 1.0 / 50.0  # Policy 추론 주기 (50Hz)
+        self.CTRL_DT = 1.0 / 200.0  # 모터 제어 주기 (200Hz)
         self.obs_buffer = deque(maxlen=4)
         self.prev_act = torch.zeros(6, device=self.device)
         self.smoothed_act = torch.zeros(6, device=self.device)
         self.manual_act = torch.zeros(6, device=self.device)  # Manual 액션 초기화
+        self.current_act = torch.zeros(6, device=self.device)  # 현재 전송할 액션 (200Hz로 전송)
 
         # 시리얼 통신
         self.serial = serial.Serial('/dev/ttyACM0', 1000000, timeout=None)
@@ -65,7 +70,9 @@ class BerkeleyControlNode(Node):
         self.running = True
         self.obs_thread = threading.Thread(target=self.obs_loop, daemon=True)
         self.obs_thread.start()
-        self.ctrl_thread = threading.Thread(target=self.ctrl_loop, daemon=True)
+        self.policy_thread = threading.Thread(target=self.policy_loop, daemon=True)  # Policy 추론 (50Hz)
+        self.policy_thread.start()
+        self.ctrl_thread = threading.Thread(target=self.ctrl_loop, daemon=True)  # 모터 제어 (200Hz)
         self.ctrl_thread.start()
         # ROS2 스핀 스레드 (콜백 처리용)
         self.spin_thread = threading.Thread(target=self.ros_spin, daemon=True)
@@ -73,8 +80,10 @@ class BerkeleyControlNode(Node):
     
     def ros_spin(self):
         """ROS2 콜백을 처리하기 위한 스핀 스레드"""
+        executor = SingleThreadedExecutor()
+        executor.add_node(self)
         while self.running and rclpy.ok():
-            rclpy.spin_once(self, timeout_sec=0.01)
+            executor.spin_once(timeout_sec=0.01)
 
     # ──────────────────────────────────────────────
     # ROS2 콜백
@@ -108,9 +117,9 @@ class BerkeleyControlNode(Node):
             time.sleep(1/200.0)
 
     # ──────────────────────────────────────────────
-    # 제어 루프 (50Hz)
+    # Policy 추론 루프 (50Hz)
     # ──────────────────────────────────────────────
-    def ctrl_loop(self):
+    def policy_loop(self):
         next_tick = time.perf_counter()
         while self.running:
             sleep_time = next_tick - time.perf_counter()
@@ -143,39 +152,84 @@ class BerkeleyControlNode(Node):
                     act = self.policy.act_inference(obs).squeeze()
                 self.smoothed_act = 0.2*self.smoothed_act + 0.8*act
                 self.prev_act = act.clone()
-                self.send_motor_cmd_auto(self.smoothed_act)
+                # Policy 출력(정규화된 값)을 실제 모터 명령으로 변환
+                self.current_act = self.convert_auto_act(self.smoothed_act)
             elif self.mode == "MANUAL::RUN":
-                # manual_act는 초기화되어 있으므로 항상 전송 (값 그대로 사용)
-                self.send_motor_cmd_manual(self.manual_act)
+                # Manual 액션: GUI에서 받은 값을 그대로 사용 (변환 없이)
+                self.current_act = self.manual_act.clone()
             elif "STOP" in self.mode:
+                self.current_act = torch.zeros(6, device=self.device)
                 self.to_neutral()
+
+    # ──────────────────────────────────────────────
+    # 모터 제어 루프 (200Hz)
+    # ──────────────────────────────────────────────
+    def ctrl_loop(self):
+        next_tick = time.perf_counter()
+        while self.running:
+            sleep_time = next_tick - time.perf_counter()
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            next_tick += self.CTRL_DT
+            
+            # 현재 액션을 모터로 전송
+            if self.mode == "AUTO::RUN" or self.mode == "MANUAL::RUN":
+                self.send_motor_cmd(self.current_act)
+            
+            # 피드백 데이터 publish (200Hz)
+            if len(self.obs_buffer) >= 4:
+                self.publish_feedback()
 
     # ──────────────────────────────────────────────
     # 보조 함수
     # ──────────────────────────────────────────────
-    def send_motor_cmd_auto(self, act):
-        """AUTO 모드용: 정규화된 액션을 실제 모터 명령으로 변환"""
-        omega_L = -30.0 * act[0].item()
-        omega_R = -30.0 * act[1].item()
-        U_L = act[2].item() + self.PI
-        U_R = act[3].item() + self.PI
-        L_L = -act[4].item() + self.PI
-        L_R = -act[5].item() + self.PI
-        pkt = f"act,{omega_L:.2f},{omega_R:.2f},{U_L:.2f},{U_R:.2f},{L_L:.2f},{L_R:.2f}\n"
-        self.serial.write(pkt.encode())
+    def convert_manual_act(self, act):
+        """Manual 액션을 Auto와 같은 형식으로 변환"""
+        # GUI에서 받은 값 [-10, 10] 범위를 [-1, 1]로 정규화 후 Auto와 같은 변환 적용
+        normalized = act / 10.0  # [-10, 10] -> [-1, 1]
+        converted = torch.zeros(6, device=self.device)
+        # Auto 모드와 동일한 변환: send_motor_cmd_auto와 동일
+        converted[0] = -30.0 * normalized[0]  # wheel_L
+        converted[1] = -30.0 * normalized[1]  # wheel_R
+        converted[2] = normalized[2] + self.PI  # upper_L
+        converted[3] = normalized[3] + self.PI  # upper_R
+        converted[4] = -normalized[4] + self.PI  # lower_L
+        converted[5] = -normalized[5] + self.PI  # lower_R
+        return converted
     
-    def send_motor_cmd_manual(self, act):
-        """MANUAL 모드용: 받은 값 그대로 사용 (이미 실제 모터 명령 값)"""
-        # act는 [wheel_L, wheel_R, upper_L, upper_R, lower_L, lower_R] 순서
-        # 직접 패킷으로 전송 (변환 없이)
+    def send_motor_cmd(self, act):
+        """모터 명령 전송 (변환된 값 사용)"""
+        # act는 이미 변환된 값 (omega, angle 형식)
         pkt = f"act,{act[0].item():.2f},{act[1].item():.2f},{act[2].item():.2f},{act[3].item():.2f},{act[4].item():.2f},{act[5].item():.2f}\n"
         self.serial.write(pkt.encode())
-        # 디버깅을 위한 로그 (처음 몇 번만 출력)
-        if not hasattr(self, '_manual_cmd_log_count'):
-            self._manual_cmd_log_count = 0
-        if self._manual_cmd_log_count < 5:
-            self.get_logger().info(f"[MANUAL_CMD] Act: [{act[0].item():.3f}, {act[1].item():.3f}, {act[2].item():.3f}, {act[3].item():.3f}, {act[4].item():.3f}, {act[5].item():.3f}], Packet: {pkt.strip()}")
-            self._manual_cmd_log_count += 1
+    
+    def publish_feedback(self):
+        """피드백 데이터 publish (관측 데이터)"""
+        if len(self.obs_buffer) < 4:
+            return
+        
+        avg = [sum(s[i] for s in self.obs_buffer)/4 for i in range(16)]
+        (U_posL,U_posR,L_posL,L_posR,wL,wR,gx,gy,gz,ax,ay,az,qw,qx,qy,qz) = avg
+        
+        # 피드백 데이터 구성 (23차원: leg_pos(4) + wheel_vel(2) + base_ang(3) + vcmd(4) + quat(4) + prev_act(6))
+        # 관측과 동일한 형식으로 전송
+        leg_pos = [
+            U_posL/self.ENC_PER_RAD - self.PI,
+            U_posR/self.ENC_PER_RAD - self.PI,
+            -(L_posL/self.ENC_PER_RAD - self.PI),
+            -(L_posR/self.ENC_PER_RAD - self.PI)
+        ]
+        wheel_vel = [-wL, -wR]
+        base_ang = [gx, gy, gz]
+        vcmd = [0.0, 0.0, 0.0, 0.0]
+        quat = [qw, qx, qy, qz]
+        prev_act_list = [self.prev_act[i].item() for i in range(6)]
+        
+        feedback_data = leg_pos + wheel_vel + base_ang + vcmd + quat + prev_act_list
+        
+        msg = Float64MultiArray()
+        msg.data = feedback_data
+        self.feedback_pub.publish(msg)
 
     def to_neutral(self):
         self.serial.write("act,0.0,0.0,3.14,3.14,3.14,3.14\n".encode())
