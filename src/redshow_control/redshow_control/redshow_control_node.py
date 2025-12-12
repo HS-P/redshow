@@ -16,18 +16,29 @@ class BerkeleyControlNode(Node):
         self.manual_sub = self.create_subscription(Float64MultiArray, 'redshow/joint_cmd', self.manual_callback, 10)
 
         # ────────────── 정책 로드 ──────────────
-        import argparse, os
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--policy_name", type=str, required=True,
-                            help="")
-        args, _ = parser.parse_known_args()
+        import os
+        # ROS2 파라미터로 정책 파일명 받기 (기본값: model_4800.pt)
+        self.declare_parameter('policy_name', 'model_4800.pt')
+        policy_name = self.get_parameter('policy_name').get_parameter_value().string_value
 
-        pt_path = os.path.join(os.path.dirname(__file__), args.policy_name)
+        # 경로 처리: 절대 경로면 그대로 사용, 아니면 패키지 디렉토리 기준으로
+        if os.path.isabs(policy_name):
+            pt_path = policy_name
+        elif os.path.exists(policy_name):
+            # 상대 경로로 파일이 존재하면 그대로 사용
+            pt_path = policy_name
+        else:
+            # 파일명만 입력된 경우 패키지 디렉토리에서 찾기
+            pt_path = os.path.join(os.path.dirname(__file__), policy_name)
         self.policy = ActorCritic(
             num_actor_obs=23, num_critic_obs=23, num_actions=6,
             actor_hidden_dims=[128,128,128], critic_hidden_dims=[128,128,128],
             activation="elu", init_noise_std=0.0
         )
+        if not os.path.exists(pt_path):
+            self.get_logger().error(f"Policy file not found: {pt_path}")
+            raise FileNotFoundError(f"Policy file not found: {pt_path}")
+        
         ckpt = torch.load(pt_path, map_location="cpu")
         state_dict = ckpt.get("model_state_dict", ckpt)
         actor_state = {k:v for k,v in state_dict.items() if k.startswith("actor")}
@@ -35,7 +46,7 @@ class BerkeleyControlNode(Node):
         self.policy.eval()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.policy.to(self.device)
-        self.get_logger().info(f"✓ Policy loaded: {args.policy_name}")
+        self.get_logger().info(f"✓ Policy loaded: {pt_path} (from parameter: {policy_name})")
 
         # ────────────── 제어 관련 변수 ──────────────
         self.ENC_PER_RAD = 651.89865
@@ -44,6 +55,7 @@ class BerkeleyControlNode(Node):
         self.obs_buffer = deque(maxlen=4)
         self.prev_act = torch.zeros(6, device=self.device)
         self.smoothed_act = torch.zeros(6, device=self.device)
+        self.manual_act = torch.zeros(6, device=self.device)  # Manual 액션 초기화
 
         # 시리얼 통신
         self.serial = serial.Serial('/dev/ttyACM0', 1000000, timeout=None)
@@ -55,6 +67,14 @@ class BerkeleyControlNode(Node):
         self.obs_thread.start()
         self.ctrl_thread = threading.Thread(target=self.ctrl_loop, daemon=True)
         self.ctrl_thread.start()
+        # ROS2 스핀 스레드 (콜백 처리용)
+        self.spin_thread = threading.Thread(target=self.ros_spin, daemon=True)
+        self.spin_thread.start()
+    
+    def ros_spin(self):
+        """ROS2 콜백을 처리하기 위한 스핀 스레드"""
+        while self.running and rclpy.ok():
+            rclpy.spin_once(self, timeout_sec=0.01)
 
     # ──────────────────────────────────────────────
     # ROS2 콜백
@@ -67,6 +87,7 @@ class BerkeleyControlNode(Node):
 
     def manual_callback(self, msg):
         self.manual_act = torch.tensor(msg.data, dtype=torch.float32, device=self.device)
+        self.get_logger().info(f"[MANUAL] Received joint_cmd: {msg.data}")
 
     # ──────────────────────────────────────────────
     # 센서 수집 루프 (200Hz)
@@ -122,17 +143,18 @@ class BerkeleyControlNode(Node):
                     act = self.policy.act_inference(obs).squeeze()
                 self.smoothed_act = 0.2*self.smoothed_act + 0.8*act
                 self.prev_act = act.clone()
-                self.send_motor_cmd(self.smoothed_act)
+                self.send_motor_cmd_auto(self.smoothed_act)
             elif self.mode == "MANUAL::RUN":
-                if hasattr(self, "manual_act"):
-                    self.send_motor_cmd(self.manual_act)
+                # manual_act는 초기화되어 있으므로 항상 전송 (값 그대로 사용)
+                self.send_motor_cmd_manual(self.manual_act)
             elif "STOP" in self.mode:
                 self.to_neutral()
 
     # ──────────────────────────────────────────────
     # 보조 함수
     # ──────────────────────────────────────────────
-    def send_motor_cmd(self, act):
+    def send_motor_cmd_auto(self, act):
+        """AUTO 모드용: 정규화된 액션을 실제 모터 명령으로 변환"""
         omega_L = -30.0 * act[0].item()
         omega_R = -30.0 * act[1].item()
         U_L = act[2].item() + self.PI
@@ -141,6 +163,19 @@ class BerkeleyControlNode(Node):
         L_R = -act[5].item() + self.PI
         pkt = f"act,{omega_L:.2f},{omega_R:.2f},{U_L:.2f},{U_R:.2f},{L_L:.2f},{L_R:.2f}\n"
         self.serial.write(pkt.encode())
+    
+    def send_motor_cmd_manual(self, act):
+        """MANUAL 모드용: 받은 값 그대로 사용 (이미 실제 모터 명령 값)"""
+        # act는 [wheel_L, wheel_R, upper_L, upper_R, lower_L, lower_R] 순서
+        # 직접 패킷으로 전송 (변환 없이)
+        pkt = f"act,{act[0].item():.2f},{act[1].item():.2f},{act[2].item():.2f},{act[3].item():.2f},{act[4].item():.2f},{act[5].item():.2f}\n"
+        self.serial.write(pkt.encode())
+        # 디버깅을 위한 로그 (처음 몇 번만 출력)
+        if not hasattr(self, '_manual_cmd_log_count'):
+            self._manual_cmd_log_count = 0
+        if self._manual_cmd_log_count < 5:
+            self.get_logger().info(f"[MANUAL_CMD] Act: [{act[0].item():.3f}, {act[1].item():.3f}, {act[2].item():.3f}, {act[3].item():.3f}, {act[4].item():.3f}, {act[5].item():.3f}], Packet: {pkt.strip()}")
+            self._manual_cmd_log_count += 1
 
     def to_neutral(self):
         self.serial.write("act,0.0,0.0,3.14,3.14,3.14,3.14\n".encode())
@@ -155,7 +190,9 @@ def main():
     rclpy.init()
     node = BerkeleyControlNode()
     try:
-        rclpy.spin(node)
+        # 스핀은 스레드에서 처리하므로 여기서는 대기만
+        while rclpy.ok():
+            time.sleep(0.1)
     except KeyboardInterrupt:
         pass
     node.destroy_node()
