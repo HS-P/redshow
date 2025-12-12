@@ -46,7 +46,7 @@ class BerkeleyControlNode(Node):
         self.smoothed_act = torch.zeros(6, device=self.device)
 
         # 시리얼 통신
-        self.serial = serial.Serial('/dev/ttyUSB0', 1000000, timeout=None)
+        self.serial = serial.Serial('/dev/ttyACM0', 1000000, timeout=None)
         self.mode = "STOP"  # MANUAL::RUN, AUTO::RUN, 등
 
         # 스레드

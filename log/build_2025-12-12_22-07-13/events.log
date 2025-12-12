@@ -1,0 +1,62 @@
+[0.000000] (-) TimerEvent: {}
+[0.000141] (redshow_control) JobQueued: {'identifier': 'redshow_control', 'dependencies': OrderedDict()}
+[0.000314] (redshow_gui) JobQueued: {'identifier': 'redshow_gui', 'dependencies': OrderedDict()}
+[0.000608] (redshow_control) JobStarted: {'identifier': 'redshow_control'}
+[0.004817] (redshow_gui) JobStarted: {'identifier': 'redshow_gui'}
+[0.099711] (-) TimerEvent: {}
+[0.199930] (-) TimerEvent: {}
+[0.300132] (-) TimerEvent: {}
+[0.400375] (-) TimerEvent: {}
+[0.500588] (-) TimerEvent: {}
+[0.600806] (-) TimerEvent: {}
+[0.701045] (-) TimerEvent: {}
+[0.801286] (-) TimerEvent: {}
+[0.901655] (-) TimerEvent: {}
+[1.001967] (-) TimerEvent: {}
+[1.037963] (redshow_control) Command: {'cmd': ['/usr/bin/python3', '-W', 'ignore:setup.py install is deprecated', '-W', 'ignore:easy_install command is deprecated', 'setup.py', 'develop', '--editable', '--build-directory', '/home/pi/ros2_ws/build/redshow_control/build', '--no-deps', 'symlink_data'], 'cwd': '/home/pi/ros2_ws/build/redshow_control', 'env': {'LESSOPEN': '| /usr/bin/lesspipe %s', 'VSCODE_CWD': '/home/pi', 'VSCODE_ESM_ENTRYPOINT': 'vs/workbench/api/node/extensionHostProcess', 'USER': 'pi', 'SSH_CLIENT': '10.239.232.11 57506 22', 'LC_TIME': 'ko_KR.UTF-8', 'VSCODE_NLS_CONFIG': '{"userLocale":"en","osLocale":"en","resolvedLanguage":"en","defaultMessagesFile":"/home/pi/.cursor-server/bin/f5edf5b2fdaaf0f44d324fa092a32515ce114c90/out/nls.messages.json","locale":"en","availableLanguages":{}}', 'VSCODE_HANDLES_UNCAUGHT_ERRORS': 'true', 'XDG_SESSION_TYPE': 'tty', 'SHLVL': '2', 'BROWSER': '/home/pi/.cursor-server/bin/f5edf5b2fdaaf0f44d324fa092a32515ce114c90/bin/helpers/browser.sh', 'HOME': '/home/pi', 'OLDPWD': '/home/pi/ros2_ws', 'VSCODE_IPC_HOOK_CLI': '/run/user/1000/vscode-ipc-f111daf4-eb01-453c-98b0-e29e0399c60a.sock', 'LC_MONETARY': 'ko_KR.UTF-8', 'NO_COLOR': '1', 'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/run/user/1000/bus', 'LOGNAME': 'pi', 'FORCE_COLOR': '0', 'VSCODE_HANDLES_SIGPIPE': 'true', '_': '/usr/bin/colcon', 'XDG_SESSION_CLASS': 'user', 'TERM': 'dumb', 'XDG_SESSION_ID': '7', 'COMPOSER_NO_INTERACTION': '1', 'PATH': '/home/pi/.local/bin:/home/pi/.cursor-server/bin/f5edf5b2fdaaf0f44d324fa092a32515ce114c90/bin/remote-cli:/home/pi/.local/bin:/home/pi/.cursor-server/bin/f5edf5b2fdaaf0f44d324fa092a32515ce114c90/bin/remote-cli:/home/pi/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin', 'VSCODE_AGENT_FOLDER': '/home/pi/.cursor-server', 'LC_ADDRESS': 'ko_KR.UTF-8', 'XDG_RUNTIME_DIR': '/run/user/1000', 'CURSOR_AGENT': '1', 'LANG': 'en_US.UTF-8', 'LC_TELEPHONE': 'ko_KR.UTF-8', 'LS_COLORS': '', 'SHELL': '/bin/bash', 'LC_NAME': 'ko_KR.UTF-8', 'VSCODE_SERVER_SHUTDOWN_TIMEOUT': '300', 'LESSCLOSE': '/usr/bin/lesspipe %s %s', 'LC_MEASUREMENT': 'ko_KR.UTF-8', 'LC_IDENTIFICATION': 'ko_KR.UTF-8', 'PWD': '/home/pi/ros2_ws/build/redshow_control', 'LC_ALL': 'en_US.UTF-8', 'SSH_CONNECTION': '10.239.232.11 57506 10.239.232.249 22', 'XDG_DATA_DIRS': '/usr/local/share:/usr/share:/var/lib/snapd/desktop', 'LC_NUMERIC': 'ko_KR.UTF-8', 'LC_PAPER': 'ko_KR.UTF-8', 'COLCON': '1', '_ZO_DOCTOR': '0', 'PYTHONPATH': '/home/pi/ros2_ws/build/redshow_control/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/pi/ros2_ws/install/redshow_control/lib/python3.12/site-packages:'}, 'shell': False}
+[1.102072] (-) TimerEvent: {}
+[1.202310] (-) TimerEvent: {}
+[1.302722] (-) TimerEvent: {}
+[1.346915] (redshow_gui) Command: {'cmd': ['/usr/bin/python3', '-W', 'ignore:setup.py install is deprecated', '-W', 'ignore:easy_install command is deprecated', 'setup.py', 'develop', '--editable', '--build-directory', '/home/pi/ros2_ws/build/redshow_gui/build', '--no-deps', 'symlink_data'], 'cwd': '/home/pi/ros2_ws/build/redshow_gui', 'env': {'LESSOPEN': '| /usr/bin/lesspipe %s', 'VSCODE_CWD': '/home/pi', 'VSCODE_ESM_ENTRYPOINT': 'vs/workbench/api/node/extensionHostProcess', 'USER': 'pi', 'SSH_CLIENT': '10.239.232.11 57506 22', 'LC_TIME': 'ko_KR.UTF-8', 'VSCODE_NLS_CONFIG': '{"userLocale":"en","osLocale":"en","resolvedLanguage":"en","defaultMessagesFile":"/home/pi/.cursor-server/bin/f5edf5b2fdaaf0f44d324fa092a32515ce114c90/out/nls.messages.json","locale":"en","availableLanguages":{}}', 'VSCODE_HANDLES_UNCAUGHT_ERRORS': 'true', 'XDG_SESSION_TYPE': 'tty', 'SHLVL': '2', 'BROWSER': '/home/pi/.cursor-server/bin/f5edf5b2fdaaf0f44d324fa092a32515ce114c90/bin/helpers/browser.sh', 'HOME': '/home/pi', 'OLDPWD': '/home/pi/ros2_ws', 'VSCODE_IPC_HOOK_CLI': '/run/user/1000/vscode-ipc-f111daf4-eb01-453c-98b0-e29e0399c60a.sock', 'LC_MONETARY': 'ko_KR.UTF-8', 'NO_COLOR': '1', 'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/run/user/1000/bus', 'LOGNAME': 'pi', 'FORCE_COLOR': '0', 'VSCODE_HANDLES_SIGPIPE': 'true', '_': '/usr/bin/colcon', 'XDG_SESSION_CLASS': 'user', 'TERM': 'dumb', 'XDG_SESSION_ID': '7', 'COMPOSER_NO_INTERACTION': '1', 'PATH': '/home/pi/.local/bin:/home/pi/.cursor-server/bin/f5edf5b2fdaaf0f44d324fa092a32515ce114c90/bin/remote-cli:/home/pi/.local/bin:/home/pi/.cursor-server/bin/f5edf5b2fdaaf0f44d324fa092a32515ce114c90/bin/remote-cli:/home/pi/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin', 'VSCODE_AGENT_FOLDER': '/home/pi/.cursor-server', 'LC_ADDRESS': 'ko_KR.UTF-8', 'XDG_RUNTIME_DIR': '/run/user/1000', 'CURSOR_AGENT': '1', 'LANG': 'en_US.UTF-8', 'LC_TELEPHONE': 'ko_KR.UTF-8', 'LS_COLORS': '', 'SHELL': '/bin/bash', 'LC_NAME': 'ko_KR.UTF-8', 'VSCODE_SERVER_SHUTDOWN_TIMEOUT': '300', 'LESSCLOSE': '/usr/bin/lesspipe %s %s', 'LC_MEASUREMENT': 'ko_KR.UTF-8', 'LC_IDENTIFICATION': 'ko_KR.UTF-8', 'PWD': '/home/pi/ros2_ws/build/redshow_gui', 'LC_ALL': 'en_US.UTF-8', 'SSH_CONNECTION': '10.239.232.11 57506 10.239.232.249 22', 'XDG_DATA_DIRS': '/usr/local/share:/usr/share:/var/lib/snapd/desktop', 'LC_NUMERIC': 'ko_KR.UTF-8', 'LC_PAPER': 'ko_KR.UTF-8', 'COLCON': '1', '_ZO_DOCTOR': '0', 'PYTHONPATH': '/home/pi/ros2_ws/build/redshow_gui/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/pi/ros2_ws/install/redshow_gui/lib/python3.12/site-packages:'}, 'shell': False}
+[1.402831] (-) TimerEvent: {}
+[1.425394] (redshow_control) StdoutLine: {'line': b'running develop\n'}
+[1.502934] (-) TimerEvent: {}
+[1.596562] (redshow_control) StdoutLine: {'line': b'running egg_info\n'}
+[1.603023] (-) TimerEvent: {}
+[1.612167] (redshow_control) StdoutLine: {'line': b'writing redshow_control.egg-info/PKG-INFO\n'}
+[1.612566] (redshow_control) StdoutLine: {'line': b'writing dependency_links to redshow_control.egg-info/dependency_links.txt\n'}
+[1.613469] (redshow_control) StdoutLine: {'line': b'writing entry points to redshow_control.egg-info/entry_points.txt\n'}
+[1.614067] (redshow_control) StdoutLine: {'line': b'writing requirements to redshow_control.egg-info/requires.txt\n'}
+[1.616604] (redshow_control) StdoutLine: {'line': b'writing top-level names to redshow_control.egg-info/top_level.txt\n'}
+[1.650351] (redshow_control) StdoutLine: {'line': b"reading manifest file 'redshow_control.egg-info/SOURCES.txt'\n"}
+[1.651433] (redshow_control) StdoutLine: {'line': b"writing manifest file 'redshow_control.egg-info/SOURCES.txt'\n"}
+[1.669391] (redshow_control) StdoutLine: {'line': b'running build_ext\n'}
+[1.669702] (redshow_control) StdoutLine: {'line': b'Creating /home/pi/ros2_ws/install/redshow_control/lib/python3.12/site-packages/redshow-control.egg-link (link to .)\n'}
+[1.670753] (redshow_control) StdoutLine: {'line': b'Installing redshow_control_node script to /home/pi/ros2_ws/install/redshow_control/lib/redshow_control\n'}
+[1.671262] (redshow_control) StdoutLine: {'line': b'\n'}
+[1.671408] (redshow_control) StdoutLine: {'line': b'Installed /home/pi/ros2_ws/build/redshow_control\n'}
+[1.671604] (redshow_control) StdoutLine: {'line': b'running symlink_data\n'}
+[1.703148] (-) TimerEvent: {}
+[1.715268] (redshow_gui) StdoutLine: {'line': b'running develop\n'}
+[1.771258] (redshow_control) CommandEnded: {'returncode': 0}
+[1.788833] (redshow_control) JobEnded: {'identifier': 'redshow_control', 'rc': 0}
+[1.803235] (-) TimerEvent: {}
+[1.890980] (redshow_gui) StdoutLine: {'line': b'running egg_info\n'}
+[1.903307] (-) TimerEvent: {}
+[1.905709] (redshow_gui) StdoutLine: {'line': b'writing redshow_gui.egg-info/PKG-INFO\n'}
+[1.906044] (redshow_gui) StdoutLine: {'line': b'writing dependency_links to redshow_gui.egg-info/dependency_links.txt\n'}
+[1.906992] (redshow_gui) StdoutLine: {'line': b'writing entry points to redshow_gui.egg-info/entry_points.txt\n'}
+[1.907651] (redshow_gui) StdoutLine: {'line': b'writing requirements to redshow_gui.egg-info/requires.txt\n'}
+[1.908343] (redshow_gui) StdoutLine: {'line': b'writing top-level names to redshow_gui.egg-info/top_level.txt\n'}
+[1.942265] (redshow_gui) StdoutLine: {'line': b"reading manifest file 'redshow_gui.egg-info/SOURCES.txt'\n"}
+[1.943164] (redshow_gui) StdoutLine: {'line': b"writing manifest file 'redshow_gui.egg-info/SOURCES.txt'\n"}
+[1.960705] (redshow_gui) StdoutLine: {'line': b'running build_ext\n'}
+[1.961054] (redshow_gui) StdoutLine: {'line': b'Creating /home/pi/ros2_ws/install/redshow_gui/lib/python3.12/site-packages/redshow-gui.egg-link (link to .)\n'}
+[1.962256] (redshow_gui) StdoutLine: {'line': b'Installing redshow_gui script to /home/pi/ros2_ws/install/redshow_gui/lib/redshow_gui\n'}
+[1.962681] (redshow_gui) StdoutLine: {'line': b'\n'}
+[1.962826] (redshow_gui) StdoutLine: {'line': b'Installed /home/pi/ros2_ws/build/redshow_gui\n'}
+[1.963024] (redshow_gui) StdoutLine: {'line': b'running symlink_data\n'}
+[2.003432] (-) TimerEvent: {}
+[2.055728] (redshow_gui) CommandEnded: {'returncode': 0}
+[2.068547] (redshow_gui) JobEnded: {'identifier': 'redshow_gui', 'rc': 0}
+[2.069406] (-) EventReactorShutdown: {}
