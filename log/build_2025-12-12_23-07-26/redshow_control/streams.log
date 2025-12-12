@@ -1,0 +1,17 @@
+[1.517s] Invoking command in '/home/pi/ros2_ws/build/redshow_control': PYTHONPATH=/home/pi/ros2_ws/build/redshow_control/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/pi/ros2_ws/install/redshow_control/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/pi/ros2_ws/build/redshow_control/build --no-deps symlink_data
+[1.977s] running develop
+[2.257s] running egg_info
+[2.283s] writing redshow_control.egg-info/PKG-INFO
+[2.284s] writing dependency_links to redshow_control.egg-info/dependency_links.txt
+[2.284s] writing entry points to redshow_control.egg-info/entry_points.txt
+[2.285s] writing requirements to redshow_control.egg-info/requires.txt
+[2.286s] writing top-level names to redshow_control.egg-info/top_level.txt
+[2.343s] reading manifest file 'redshow_control.egg-info/SOURCES.txt'
+[2.344s] writing manifest file 'redshow_control.egg-info/SOURCES.txt'
+[2.372s] running build_ext
+[2.373s] Creating /home/pi/ros2_ws/install/redshow_control/lib/python3.12/site-packages/redshow-control.egg-link (link to .)
+[2.374s] Installing redshow_control_node script to /home/pi/ros2_ws/install/redshow_control/lib/redshow_control
+[2.374s] 
+[2.374s] Installed /home/pi/ros2_ws/build/redshow_control
+[2.374s] running symlink_data
+[2.488s] Invoked command in '/home/pi/ros2_ws/build/redshow_control' returned '0': PYTHONPATH=/home/pi/ros2_ws/build/redshow_control/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/pi/ros2_ws/install/redshow_control/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/pi/ros2_ws/build/redshow_control/build --no-deps symlink_data

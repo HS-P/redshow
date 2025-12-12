@@ -127,9 +127,16 @@ class MonitorGUI(QMainWindow):
             if idx in self.obs_buffer:
                 self.obs_buffer[idx].append(msg.data[idx])
         
-        # time_buffer 업데이트
+        # time_buffer 업데이트 (obs_buffer와 길이 맞추기)
         self.time_buffer.append(self.step)
         self.step += 1
+        
+        # 디버깅: 처음 몇 번만 로그
+        if not hasattr(self, '_feedback_log_count'):
+            self._feedback_log_count = 0
+        if self._feedback_log_count < 3:
+            print(f"[GUI Feedback] Received {len(msg.data)} dims, step={self.step}, buffer sizes: {[len(self.obs_buffer[i]) for i in range(min(6, 23))]}")
+            self._feedback_log_count += 1
 
     # =========================
     # UI SETUP
@@ -176,6 +183,13 @@ class MonitorGUI(QMainWindow):
             sb=QDoubleSpinBox()
             sb.setRange(-10,10)
             sb.setDecimals(4)
+            # Wheel은 1.0씩, Joint position은 0.1씩 증가
+            if i < 2:  # Wheel L, Wheel R
+                sb.setSingleStep(1.0)
+            else:  # Upper L, Upper R, Lower L, Lower R
+                sb.setSingleStep(0.1)
+            # [수정] 값이 변경되면 즉시 전송 (반응성 향상)
+            sb.valueChanged.connect(self.send_manual_joint_cmd)
             grid.addWidget(QLabel(n),i,0)
             grid.addWidget(sb,i,1)
             self.manual_inputs.append(sb)
@@ -354,6 +368,10 @@ class MonitorGUI(QMainWindow):
         if self.current_mode=="MANUAL":
             if self.is_running:
                 self.manual_timer.start(20)
+                # [수정] RUN 시작 시 즉시 현재 값 전송
+                self.send_manual_joint_cmd()
+                # [추가] Control Node의 0점 초기화 이후에 확실히 적용되도록 약간의 딜레이 후 재전송
+                QTimer.singleShot(100, self.send_manual_joint_cmd)
             else:
                 self.manual_timer.stop()
                 # STOP 시 반드시 모든 조인트를 0으로 설정
@@ -411,20 +429,25 @@ class MonitorGUI(QMainWindow):
         
         # 각 그룹별 그래프 업데이트 (피드백 데이터 사용)
         for group_name,group_info in self.obs_groups.items():
-            if len(self.time_buffer)>0:
+            if len(self.time_buffer)>0 and len(self.time_buffer) > 0:
                 times=np.array(self.time_buffer)
                 ax=self.obs_axes[group_name]
                 lines=self.obs_lines[group_name]
                 
+                data_exists = False
                 for i,idx in enumerate(group_info['indices']):
-                    if len(self.obs_buffer[idx])>0:
+                    if idx in self.obs_buffer and len(self.obs_buffer[idx])>0:
                         values=np.array(list(self.obs_buffer[idx]))
-                        if len(values)==len(times):
-                            lines[i].set_data(times,values)
+                        # 길이가 다를 경우 짧은 쪽에 맞춤
+                        min_len = min(len(times), len(values))
+                        if min_len > 0:
+                            lines[i].set_data(times[:min_len], values[:min_len])
+                            data_exists = True
                 
-                ax.relim()
-                ax.autoscale_view()
-                self.obs_canvases[group_name].draw()
+                if data_exists:
+                    ax.relim()
+                    ax.autoscale_view()
+                    self.obs_canvases[group_name].draw()
 
     def closeEvent(self,event):
         """종료 시 정리"""
