@@ -61,6 +61,7 @@ class MonitorGUI(QMainWindow):
         self.current_mode=None
         self.is_running=False
         self.step=0
+        self.selected_mode_btn=None  # 현재 선택된 모드 버튼 (Manual or Auto)
 
         # ---- buffers ----
         self.prev_act=torch.zeros(6,device=self.device)
@@ -140,6 +141,9 @@ class MonitorGUI(QMainWindow):
             btn_layout.addWidget(b)
         btn_group.setLayout(btn_layout)
         l.addWidget(btn_group)
+        
+        # 버튼 초기 스타일 설정
+        self.update_run_button_style()
 
         # Manual 입력
         manual_group=QGroupBox("Manual Input")
@@ -263,12 +267,62 @@ class MonitorGUI(QMainWindow):
     # BUTTON CALLBACKS
     # =========================
     def on_manual(self):
+        # 기존 선택 해제
+        if self.selected_mode_btn is not None and self.selected_mode_btn != self.manual_btn:
+            self.selected_mode_btn.setStyleSheet("")  # 기본 스타일로 복원
+            # 다른 모드에서 RUN 중이었다면 정지
+            if self.is_running:
+                self.is_running = False
+                self.manual_timer.stop()
+                self.ros2_node.publish_cmd(f"{self.current_mode}::STOP")
+                # STOP 시 반드시 모든 조인트를 0으로 설정
+                zero_actions = [0.0] * 6
+                self.ros2_node.publish_joint_cmd(zero_actions)
+        
+        # Manual 모드 선택
         self.current_mode="MANUAL"
+        self.selected_mode_btn = self.manual_btn
+        self.manual_btn.setStyleSheet("background-color: #4A90E2; color: white; font-weight: bold;")
+        self.auto_btn.setStyleSheet("")  # Auto 버튼 스타일 초기화
         self.ros2_node.publish_cmd("MANUAL::STOP")
+        
+        # RUN 중이었다면 중지
+        if self.is_running:
+            self.is_running = False
+            self.manual_timer.stop()
+            # STOP 시 반드시 모든 조인트를 0으로 설정
+            zero_actions = [0.0] * 6
+            self.ros2_node.publish_joint_cmd(zero_actions)
+        self.update_run_button_style()
 
     def on_auto(self):
+        # 기존 선택 해제
+        if self.selected_mode_btn is not None and self.selected_mode_btn != self.auto_btn:
+            self.selected_mode_btn.setStyleSheet("")  # 기본 스타일로 복원
+            # 다른 모드에서 RUN 중이었다면 정지
+            if self.is_running:
+                self.is_running = False
+                self.manual_timer.stop()
+                self.ros2_node.publish_cmd(f"{self.current_mode}::STOP")
+                # STOP 시 반드시 모든 조인트를 0으로 설정
+                zero_actions = [0.0] * 6
+                self.ros2_node.publish_joint_cmd(zero_actions)
+        
+        # Auto 모드 선택
         self.current_mode="AUTO"
+        self.selected_mode_btn = self.auto_btn
+        self.auto_btn.setStyleSheet("background-color: #4A90E2; color: white; font-weight: bold;")
+        self.manual_btn.setStyleSheet("")  # Manual 버튼 스타일 초기화
         self.ros2_node.publish_cmd("AUTO::STOP")
+        
+        # RUN 중이었다면 중지
+        if self.is_running:
+            self.is_running = False
+            self.manual_timer.stop()
+            # STOP 시 반드시 모든 조인트를 0으로 설정
+            zero_actions = [0.0] * 6
+            self.ros2_node.publish_joint_cmd(zero_actions)
+        self.update_run_button_style()
 
     def on_run(self):
         if self.current_mode is None:
@@ -277,7 +331,30 @@ class MonitorGUI(QMainWindow):
         cmd=f"{self.current_mode}::{'RUN' if self.is_running else 'STOP'}"
         self.ros2_node.publish_cmd(cmd)
         if self.current_mode=="MANUAL":
-            self.manual_timer.start(20) if self.is_running else self.manual_timer.stop()
+            if self.is_running:
+                self.manual_timer.start(20)
+            else:
+                self.manual_timer.stop()
+                # STOP 시 반드시 모든 조인트를 0으로 설정
+                zero_actions = [0.0] * 6
+                self.ros2_node.publish_joint_cmd(zero_actions)
+        
+        # STOP 시 반드시 모든 조인트를 0으로 설정 (MANUAL/AUTO 모두)
+        if not self.is_running:
+            zero_actions = [0.0] * 6
+            self.ros2_node.publish_joint_cmd(zero_actions)
+        
+        # RUN 버튼 텍스트 및 스타일 업데이트
+        self.update_run_button_style()
+    
+    def update_run_button_style(self):
+        """RUN 버튼의 텍스트와 스타일을 상태에 따라 업데이트"""
+        if self.is_running:
+            self.run_btn.setText("STOP")
+            self.run_btn.setStyleSheet("background-color: #50C878; color: white; font-weight: bold;")  # 초록색
+        else:
+            self.run_btn.setText("RUN")
+            self.run_btn.setStyleSheet("")  # 기본 스타일
 
     # =========================
     # DATA FLOW
@@ -339,6 +416,11 @@ class MonitorGUI(QMainWindow):
             self.ros2_node.publish_cmd("MANUAL::STOP")
         elif self.current_mode=="AUTO" and self.is_running:
             self.ros2_node.publish_cmd("AUTO::STOP")
+        
+        # 종료 시 반드시 모든 조인트를 0으로 설정
+        zero_actions = [0.0] * 6
+        self.ros2_node.publish_joint_cmd(zero_actions)
+        
         try:
             self.ros2_node.destroy_node()
             rclpy.shutdown()
