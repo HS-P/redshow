@@ -19,6 +19,7 @@ setup(
         'torch',
         'matplotlib>=3.6.0',  # PySide6 호환성을 위해 3.6.0 이상 필요
         'numpy',
+        'pyyaml',
     ],
     zip_safe=True,
     maintainer='User',

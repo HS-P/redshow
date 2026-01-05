@@ -1,0 +1,17 @@
+[0.346s] Invoking command in '/home/hansol/redshow/build/redshow_gui': CONDA_PROMPT_MODIFIER=(isaaclab) PYTHONPATH=/home/hansol/redshow/build/redshow_gui/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/hansol/redshow/install/redshow_gui/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/hansol/redshow/build/redshow_gui/build --no-deps symlink_data
+[0.448s] running develop
+[0.508s] running egg_info
+[0.508s] writing redshow_gui.egg-info/PKG-INFO
+[0.508s] writing dependency_links to redshow_gui.egg-info/dependency_links.txt
+[0.508s] writing entry points to redshow_gui.egg-info/entry_points.txt
+[0.508s] writing requirements to redshow_gui.egg-info/requires.txt
+[0.508s] writing top-level names to redshow_gui.egg-info/top_level.txt
+[0.509s] reading manifest file 'redshow_gui.egg-info/SOURCES.txt'
+[0.510s] writing manifest file 'redshow_gui.egg-info/SOURCES.txt'
+[0.510s] running build_ext
+[0.510s] Creating /home/hansol/redshow/install/redshow_gui/lib/python3.10/site-packages/redshow-gui.egg-link (link to .)
+[0.510s] Installing redshow_gui script to /home/hansol/redshow/install/redshow_gui/lib/redshow_gui
+[0.510s] 
+[0.510s] Installed /home/hansol/redshow/build/redshow_gui
+[0.510s] running symlink_data
+[0.524s] Invoked command in '/home/hansol/redshow/build/redshow_gui' returned '0': CONDA_PROMPT_MODIFIER=(isaaclab) PYTHONPATH=/home/hansol/redshow/build/redshow_gui/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/hansol/redshow/install/redshow_gui/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/hansol/redshow/build/redshow_gui/build --no-deps symlink_data

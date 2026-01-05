@@ -1,0 +1,17 @@
+running develop
+running egg_info
+writing redshow_control.egg-info/PKG-INFO
+writing dependency_links to redshow_control.egg-info/dependency_links.txt
+writing entry points to redshow_control.egg-info/entry_points.txt
+writing requirements to redshow_control.egg-info/requires.txt
+writing top-level names to redshow_control.egg-info/top_level.txt
+reading manifest file 'redshow_control.egg-info/SOURCES.txt'
+writing manifest file 'redshow_control.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/hansol/redshow/install/redshow_control/lib/python3.10/site-packages/redshow-control.egg-link (link to .)
+Installing bno085_test_node script to /home/hansol/redshow/install/redshow_control/lib/redshow_control
+Installing redshow_control_node script to /home/hansol/redshow/install/redshow_control/lib/redshow_control
+Installing test_feedback_publisher script to /home/hansol/redshow/install/redshow_control/lib/redshow_control
+
+Installed /home/hansol/redshow/build/redshow_control
+running symlink_data

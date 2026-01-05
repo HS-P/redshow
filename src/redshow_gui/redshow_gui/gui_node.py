@@ -15,6 +15,7 @@ warnings.filterwarnings('ignore', message='.*Axes3D.*')
 
 import numpy as np
 import torch
+import yaml
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -73,11 +74,13 @@ class ROS2Node(Node):
         super().__init__('gui_node')
         self.cmd_pub = self.create_publisher(String, 'redshow/cmd', 10)
         self.joint_pub = self.create_publisher(Float64MultiArray, 'redshow/joint_cmd', 10)
+        self.velocity_command_pub = self.create_publisher(Float64MultiArray, 'redshow/velocity_command', 10)
         self.model_path_pub = self.create_publisher(String, 'redshow/model_path', 10)
         self.feedback_sub = None
         self.policy_hz_sub = None
         self.shutdown_sub = None
         self.obs_config_sub = None
+        self.extrinsics_obs_sub = None
         self.feedback_data = None
         self.last_feedback_time = None
         self.feedback_count = 0
@@ -93,6 +96,11 @@ class ROS2Node(Node):
         msg.data = joints
         self.joint_pub.publish(msg)
     
+    def publish_velocity_command(self, vcmd):
+        msg = Float64MultiArray()
+        msg.data = vcmd
+        self.velocity_command_pub.publish(msg)
+    
     def publish_model_path(self, model_path):
         msg = String()
         msg.data = model_path
@@ -107,11 +115,18 @@ class ROS2Node(Node):
         self.policy_hz_sub = self.create_subscription(
             Float64MultiArray, 'redshow/policy_hz', callback, 10
         )
+        self.get_logger().info("[ROS2] Subscribed to redshow/policy_hz")
     
     def setup_shutdown_subscriber(self, callback):
         self.shutdown_sub = self.create_subscription(
             String, 'redshow/shutdown', callback, 10
         )
+    
+    def setup_extrinsics_obs_subscriber(self, callback):
+        self.extrinsics_obs_sub = self.create_subscription(
+            Float64MultiArray, 'redshow/extrinsics_obs', callback, 10
+        )
+        self.get_logger().info("[ROS2] Subscribed to redshow/extrinsics_obs")
 
     def get_feedback_hz(self):
         """Observation Hz 계산"""
@@ -157,6 +172,7 @@ class MonitorGUI(QMainWindow):
         # 각 Observation 인덱스별 상태 추적
         self.obs_index_status = {}  # {index: {'ready': bool, 'last_time': float, 'hz': float}}
         self.obs_index_hz_buffers = {}  # {index: deque} - 각 인덱스별 Hz 버퍼
+        # 초기에는 23개로 시작, PT 파일 로드 후 num_actor_obs로 업데이트됨
         for idx in range(23):
             self.obs_index_status[idx] = {'ready': False, 'last_time': None, 'hz': 0.0}
             self.obs_index_hz_buffers[idx] = deque(maxlen=50)
@@ -170,6 +186,13 @@ class MonitorGUI(QMainWindow):
         self.time_buffer = deque(maxlen=self.max_history)
         self.obs_buffer = {}  # 각 observation별 버퍼
         self.act_buffer = deque(maxlen=self.max_history)
+        
+        # Velocity commands (GUI에서 설정)
+        self.velocity_commands = [0.0, 0.0, 0.0, 0.0]
+        
+        # A-RMA 관련
+        self.arma_file_path = None
+        self.is_arma_model = False
         
         # Observation 그룹 정의 - PT 파일에서 로드할 때까지 빈 상태
         # 사전 정의하지 않음, PT 파일에서 정보를 받아서 설정
@@ -186,6 +209,7 @@ class MonitorGUI(QMainWindow):
         self.ros2_node.setup_feedback_subscriber(self.feedback_callback)
         self.ros2_node.setup_policy_hz_subscriber(self.policy_hz_callback)
         self.ros2_node.setup_shutdown_subscriber(self.shutdown_callback)
+        self.ros2_node.setup_extrinsics_obs_subscriber(self.extrinsics_obs_callback)
         threading.Thread(target=self.ros_spin, daemon=True).start()
 
         # ---- timers ----
@@ -218,9 +242,39 @@ class MonitorGUI(QMainWindow):
     
     def feedback_callback(self, msg):
         """피드백 데이터 콜백"""
-        if len(msg.data) != 23:
-            self.get_logger().warn(f"[FEEDBACK] Invalid data length: {len(msg.data)} (expected 23)")
-            return
+        # num_actor_obs가 설정되어 있으면 그 값 사용, 없으면 기본값 23
+        expected_dim = self.num_actor_obs if hasattr(self, 'num_actor_obs') and self.num_actor_obs > 0 else 23
+        
+        # 받은 데이터 길이와 기대하는 차원 중 작은 값만큼 처리
+        data_len = len(msg.data)
+        max_idx = min(data_len, expected_dim)
+        
+        # 차원 불일치 경고는 한 번만 출력 (정상적인 상황일 수 있음)
+        if data_len != expected_dim:
+            if not hasattr(self, '_dim_mismatch_warned'):
+                self._dim_mismatch_warned = {}
+            
+            mismatch_key = f"{data_len}_{expected_dim}"
+            if mismatch_key not in self._dim_mismatch_warned:
+                if data_len < expected_dim:
+                    self.get_logger().info(
+                        f"[FEEDBACK] Data length ({data_len}) < expected ({expected_dim}). "
+                        f"Missing {expected_dim - data_len} values will be None (this is normal if using test_feedback_publisher)"
+                    )
+                else:
+                    self.get_logger().info(
+                        f"[FEEDBACK] Data length ({data_len}) > expected ({expected_dim}). "
+                        f"Extra {data_len - expected_dim} values will be ignored"
+                    )
+                self._dim_mismatch_warned[mismatch_key] = True
+        
+        # num_actor_obs가 업데이트되면 obs_index_status와 obs_buffer도 확장
+        if expected_dim > len(self.obs_index_status):
+            for idx in range(len(self.obs_index_status), expected_dim):
+                self.obs_index_status[idx] = {'ready': False, 'last_time': None, 'hz': 0.0}
+                self.obs_index_hz_buffers[idx] = deque(maxlen=50)
+                if idx not in self.obs_buffer:
+                    self.obs_buffer[idx] = deque(maxlen=self.max_history)
         
         current_time = time.time()
         
@@ -228,37 +282,96 @@ class MonitorGUI(QMainWindow):
         data_array = np.array(msg.data)
         any_data_ready = False
         
-        for idx in range(23):
-            value = msg.data[idx]
-            # 데이터가 0이 아니거나 (센서 데이터), 또는 인덱스가 17-22 (prev_act)인 경우는 항상 업데이트
-            is_valid = not np.isclose(value, 0.0, atol=1e-6) or (17 <= idx <= 22)
+        # 받은 데이터를 env.yaml observation 인덱스로 매핑
+        # Control Node가 보내는 데이터는 앞에서부터 순차적으로 채움
+        control_to_env_idx_map = {}  # {control_idx: env_idx}
+        
+        if self.obs_groups:
+            for group_name, group_info in self.obs_groups.items():
+                control_start = group_info.get('control_start_idx')
+                if control_start is not None:
+                    for i, env_idx in enumerate(group_info['indices']):
+                        if control_start + i < data_len:  # 받은 데이터 범위 내에서만 매핑
+                            control_to_env_idx_map[control_start + i] = env_idx
+        
+        # 받은 데이터만큼 처리
+        for control_idx in range(max_idx):
+            # Control Node 인덱스를 env.yaml observation 인덱스로 변환
+            env_idx = control_to_env_idx_map.get(control_idx)
+            if env_idx is None:
+                # 매핑되지 않은 데이터는 건너뜀
+                continue
+            value = msg.data[control_idx]
+            
+            # 데이터 유효성 검사: 모든 데이터는 유효함 (0.0이어도 데이터가 들어온 것이므로)
+            # 단, 너무 오래 지나면 None으로 처리됨
+            is_valid = True
             
             if is_valid:
                 # 이전 시간과의 간격으로 Hz 계산
-                if self.obs_index_status[idx]['last_time'] is not None:
-                    dt = current_time - self.obs_index_status[idx]['last_time']
+                if self.obs_index_status[env_idx]['last_time'] is not None:
+                    dt = current_time - self.obs_index_status[env_idx]['last_time']
                     if dt > 0 and dt < 1.0:
                         hz = 1.0 / dt
                         if 0 < hz < 1000:
-                            self.obs_index_hz_buffers[idx].append(hz)
+                            self.obs_index_hz_buffers[env_idx].append(hz)
                             # Hz 평균 계산
-                            if len(self.obs_index_hz_buffers[idx]) > 0:
-                                self.obs_index_status[idx]['hz'] = np.mean(self.obs_index_hz_buffers[idx])
+                            if len(self.obs_index_hz_buffers[env_idx]) > 0:
+                                self.obs_index_status[env_idx]['hz'] = np.mean(self.obs_index_hz_buffers[env_idx])
                 
-                self.obs_index_status[idx]['ready'] = True
-                self.obs_index_status[idx]['last_time'] = current_time
+                self.obs_index_status[env_idx]['ready'] = True
+                self.obs_index_status[env_idx]['last_time'] = current_time
                 any_data_ready = True
                 
-                # 피드백 데이터를 obs_buffer에 추가
-                if idx in self.obs_buffer:
-                    self.obs_buffer[idx].append(value)
-            else:
-                # 데이터가 0이면 상태는 유지하되, 시간이 오래 지나면 None으로 변경
-                if self.obs_index_status[idx]['last_time'] is not None:
-                    elapsed = current_time - self.obs_index_status[idx]['last_time']
+                # 피드백 데이터를 obs_buffer에 추가 (env_idx 사용)
+                if env_idx in self.obs_buffer:
+                    self.obs_buffer[env_idx].append(value)
+        
+        # Velocity commands는 GUI에서 설정한 값으로 업데이트
+        if self.obs_groups and 'velocity_commands' in self.obs_groups:
+            vcmd_indices = self.obs_groups['velocity_commands']['indices']
+            for i, env_idx in enumerate(vcmd_indices):
+                if i < len(self.velocity_commands):
+                    if env_idx in self.obs_buffer:
+                        self.obs_buffer[env_idx].append(self.velocity_commands[i])
+                    self.obs_index_status[env_idx]['ready'] = True
+                    self.obs_index_status[env_idx]['last_time'] = current_time
+        
+        # 차원 불일치 경고 (A-RMA 모델인 경우 extrinsics_obs는 별도 토픽으로 오므로 제외)
+        # A-RMA 모델인 경우: 기본 23개 + extrinsics_obs 8개(별도 토픽) = 31개
+        # 따라서 feedback 토픽에서 23개만 받는 것은 정상
+        if expected_dim > 0 and data_len < expected_dim:
+            missing_count = expected_dim - data_len
+            
+            # A-RMA 모델이고 extrinsics_obs가 별도 토픽으로 오는 경우는 경고하지 않음
+            is_arma_with_separate_extrinsics = (
+                self.is_arma_model and 
+                'extrinsics_obs' in self.obs_groups and
+                missing_count == 8  # extrinsics_obs 차원과 일치
+            )
+            
+            if not is_arma_with_separate_extrinsics and self.is_running:
+                # A-RMA가 아닌 경우 또는 다른 차원 불일치인 경우에만 경고
+                self.show_warning(
+                    f"경고: 데이터 차원 불일치!\n"
+                    f"기대: {expected_dim}개, 받음: {data_len}개\n"
+                    f"부족한 데이터: {missing_count}개"
+                )
+                # RUN 중이면 STOP
+                if self.is_running:
+                    self.is_running = False
+                    self.ros2_node.publish_cmd(f"{self.current_mode}::STOP")
+                    self.update_run_button_style()
+    
+        # 받은 데이터보다 많은 인덱스가 있으면 (예: 31개 기대인데 23개만 받음)
+        # 나머지는 None으로 처리
+        for env_idx in range(max_idx, expected_dim):
+            if env_idx not in control_to_env_idx_map.values():  # Control Node에서 오지 않는 데이터
+                if self.obs_index_status[env_idx]['last_time'] is not None:
+                    elapsed = current_time - self.obs_index_status[env_idx]['last_time']
                     if elapsed > 1.0:  # 1초 이상 데이터가 없으면 None
-                        self.obs_index_status[idx]['ready'] = False
-                        self.obs_index_status[idx]['hz'] = 0.0
+                        self.obs_index_status[env_idx]['ready'] = False
+                        self.obs_index_status[env_idx]['hz'] = 0.0
         
         # 전체 상태 업데이트
         if any_data_ready:
@@ -278,10 +391,73 @@ class MonitorGUI(QMainWindow):
         self.time_buffer.append(len(self.time_buffer))
         self.ros2_node.feedback_count += 1
     
+    def show_warning(self, message: str, throttle_sec: float = 5.0):
+        """시각적 경고 메시지 표시 (throttle로 중복 방지)"""
+        current_time = time.time()
+        
+        # 같은 메시지가 최근에 표시되었는지 확인
+        if not hasattr(self, '_last_warning_time'):
+            self._last_warning_time = {}
+        
+        warning_key = message[:50]  # 메시지의 처음 50자로 키 생성
+        last_time = self._last_warning_time.get(warning_key, 0)
+        
+        if current_time - last_time < throttle_sec:
+            return  # 최근에 표시했으면 건너뜀
+        
+        self._last_warning_time[warning_key] = current_time
+        self.warning_label.setText(message)
+        self.warning_label.show()
+        self.get_logger().warn(f"[GUI WARNING] {message}")
+    
     def policy_hz_callback(self, msg):
         """Policy Hz 콜백"""
         if len(msg.data) > 0:
             self.policy_hz = msg.data[0]
+            # 첫 번째 메시지 수신 시 로그 출력 (한 번만)
+            if not hasattr(self, '_policy_hz_received'):
+                self.get_logger().info(f"[GUI] Policy Hz received: {self.policy_hz:.1f} Hz")
+                self._policy_hz_received = True
+    
+    def extrinsics_obs_callback(self, msg):
+        """Extrinsics Observation 콜백 (A-RMA Adaptation Module에서 발행)"""
+        if not self.obs_groups or 'extrinsics_obs' not in self.obs_groups:
+            return
+        
+        if len(msg.data) != 8:
+            self.get_logger().warn(f"[GUI] Invalid extrinsics_obs data length: {len(msg.data)}, expected 8")
+            return
+        
+        current_time = time.time()
+        extrinsics_indices = self.obs_groups['extrinsics_obs']['indices']
+        
+        # extrinsics_obs 데이터를 마지막 8개 인덱스에 매핑
+        for i, env_idx in enumerate(extrinsics_indices):
+            if i < len(msg.data):
+                value = msg.data[i]
+                
+                # Hz 계산
+                if env_idx in self.obs_index_status and self.obs_index_status[env_idx]['last_time'] is not None:
+                    dt = current_time - self.obs_index_status[env_idx]['last_time']
+                    if dt > 0 and dt < 1.0:
+                        hz = 1.0 / dt
+                        if 0 < hz < 1000:
+                            self.obs_index_hz_buffers[env_idx].append(hz)
+                            if len(self.obs_index_hz_buffers[env_idx]) > 0:
+                                self.obs_index_status[env_idx]['hz'] = np.mean(self.obs_index_hz_buffers[env_idx])
+                
+                # 상태 업데이트
+                self.obs_index_status[env_idx]['ready'] = True
+                self.obs_index_status[env_idx]['last_time'] = current_time
+                
+                # 버퍼에 추가
+                if env_idx in self.obs_buffer:
+                    self.obs_buffer[env_idx].append(value)
+        
+        # 첫 번째 메시지 수신 시 로그 출력
+        if not hasattr(self, '_extrinsics_obs_received'):
+            self.get_logger().info(f"[GUI] Extrinsics obs received: {len(msg.data)} values")
+            self._extrinsics_obs_received = True
     
     def shutdown_callback(self, msg):
         """Control node 종료 신호 콜백"""
@@ -344,12 +520,20 @@ class MonitorGUI(QMainWindow):
         file_group = QGroupBox("Model File")
         file_layout = QVBoxLayout()
         
-        self.open_file_btn = QPushButton("파일 열기")
+        # Policy 파일 선택
+        policy_file_layout = QHBoxLayout()
+        self.open_file_btn = QPushButton("Policy 파일 선택")
         self.open_file_btn.clicked.connect(self.open_file_dialog)
-        self.open_file_btn.setMinimumHeight(40)
-        file_layout.addWidget(self.open_file_btn)
+        policy_file_layout.addWidget(self.open_file_btn)
         
-        # 현재 선택된 파일 표시
+        # A-RMA 파일 선택
+        self.open_arma_file_btn = QPushButton("A-RMA 파일 선택")
+        self.open_arma_file_btn.clicked.connect(self.open_arma_file_dialog)
+        policy_file_layout.addWidget(self.open_arma_file_btn)
+        
+        file_layout.addLayout(policy_file_layout)
+        
+        # Policy 파일 표시
         self.current_file_label = QLabel("현재 선택된 파일이 없습니다.")
         self.current_file_label.setWordWrap(True)
         self.current_file_label.setAlignment(Qt.AlignCenter)
@@ -360,12 +544,48 @@ class MonitorGUI(QMainWindow):
         )
         file_layout.addWidget(self.current_file_label)
         
+        # A-RMA 파일 표시
+        self.arma_file_label = QLabel("A-RMA 파일이 선택되지 않았습니다.")
+        self.arma_file_label.setWordWrap(True)
+        self.arma_file_label.setAlignment(Qt.AlignCenter)
+        self.arma_file_label.setMinimumHeight(50)
+        self.arma_file_label.setStyleSheet(
+            "padding: 10px; background-color: #666; color: white; "
+            "font-weight: bold; font-size: 11pt; border-radius: 5px;"
+        )
+        file_layout.addWidget(self.arma_file_label)
+        
+        # A-RMA 상태 표시
+        self.arma_status_label = QLabel("A-RMA: OFF")
+        self.arma_status_label.setAlignment(Qt.AlignCenter)
+        self.arma_status_label.setStyleSheet(
+            "padding: 10px; background-color: #666; color: white; "
+            "font-weight: bold; font-size: 12pt; border-radius: 5px;"
+        )
+        file_layout.addWidget(self.arma_status_label)
+        
+        # 경고 메시지 표시 영역
+        self.warning_label = QLabel("")
+        self.warning_label.setAlignment(Qt.AlignCenter)
+        self.warning_label.setWordWrap(True)
+        self.warning_label.setStyleSheet(
+            "padding: 15px; background-color: #ff4444; color: white; "
+            "font-weight: bold; font-size: 11pt; border-radius: 5px;"
+        )
+        self.warning_label.hide()
+        file_layout.addWidget(self.warning_label)
+        
         file_group.setLayout(file_layout)
         l.addWidget(file_group)
         
         # Observation 상태 (각 인덱스별)
         obs_status_group = QGroupBox("Observation Status")
         obs_status_layout = QVBoxLayout()
+        
+        # 토픽명 표시
+        obs_topic_label = QLabel("Topic: redshow/feedback")
+        obs_topic_label.setStyleSheet("font-size: 9pt; color: #666; padding: 2px;")
+        obs_status_layout.addWidget(obs_topic_label)
         
         # 스크롤 가능한 영역 생성
         obs_scroll = QScrollArea()
@@ -405,6 +625,11 @@ class MonitorGUI(QMainWindow):
         # Policy Hz 표시
         policy_hz_group = QGroupBox("Policy Hz")
         policy_hz_layout = QVBoxLayout()
+        
+        # 토픽명 표시
+        policy_topic_label = QLabel("Topic: redshow/policy_hz")
+        policy_topic_label.setStyleSheet("font-size: 9pt; color: #666; padding: 2px;")
+        policy_hz_layout.addWidget(policy_topic_label)
         
         self.policy_hz_label = QLabel("Policy Hz: 0.0 Hz")
         self.policy_hz_label.setAlignment(Qt.AlignCenter)
@@ -472,6 +697,31 @@ class MonitorGUI(QMainWindow):
         w = QWidget()
         l = QVBoxLayout(w)
         
+        # Velocity Commands 입력
+        vcmd_group = QGroupBox("Velocity Commands")
+        vcmd_layout = QGridLayout()
+        
+        self.velocity_command_inputs = []
+        vcmd_names = ["Velocity X", "Velocity Y", "Velocity Z", "Heading"]
+        
+        for i, name in enumerate(vcmd_names):
+            label = QLabel(name)
+            label.setMinimumWidth(100)
+            sb = QDoubleSpinBox()
+            sb.setRange(-10.0, 10.0)
+            sb.setDecimals(4)
+            sb.setValue(0.0)  # 초기값 0
+            sb.setSingleStep(0.1)
+            sb.valueChanged.connect(self.send_manual_joint_cmd)
+            
+            vcmd_layout.addWidget(label, i, 0)
+            vcmd_layout.addWidget(sb, i, 1)
+            self.velocity_command_inputs.append(sb)
+        
+        vcmd_group.setLayout(vcmd_layout)
+        l.addWidget(vcmd_group)
+        
+        # Action 입력
         manual_group = QGroupBox("Manual Action Input")
         manual_layout = QGridLayout()
         
@@ -503,57 +753,142 @@ class MonitorGUI(QMainWindow):
         w = QWidget()
         l = QVBoxLayout(w)
         
-        info_label = QLabel("Auto 모드에서는 Policy가 자동으로 Action을 생성합니다.")
+        # Velocity Commands 입력
+        vcmd_group = QGroupBox("Velocity Commands")
+        vcmd_layout = QGridLayout()
+        
+        self.auto_velocity_command_inputs = []
+        vcmd_names = ["Velocity X", "Velocity Y", "Velocity Z", "Heading"]
+        
+        for i, name in enumerate(vcmd_names):
+            label = QLabel(name)
+            label.setMinimumWidth(100)
+            sb = QDoubleSpinBox()
+            sb.setRange(-10.0, 10.0)
+            sb.setDecimals(4)
+            sb.setValue(0.0)  # 초기값 0
+            sb.setSingleStep(0.1)
+            # Auto 모드에서는 velocity command 변경 시 control node에 전송 필요
+            sb.valueChanged.connect(self.on_velocity_command_changed)
+            
+            vcmd_layout.addWidget(label, i, 0)
+            vcmd_layout.addWidget(sb, i, 1)
+            self.auto_velocity_command_inputs.append(sb)
+        
+        vcmd_group.setLayout(vcmd_layout)
+        l.addWidget(vcmd_group)
+        
+        info_label = QLabel("Auto 모드에서는 Policy가 자동으로 Action을 생성합니다.\nVelocity Commands는 위에서 설정할 수 있습니다.")
         info_label.setAlignment(Qt.AlignCenter)
-        info_label.setStyleSheet("font-size: 14pt; padding: 20px;")
+        info_label.setStyleSheet("font-size: 12pt; padding: 20px;")
         l.addWidget(info_label)
         
         l.addStretch()
         return w
 
     def make_graph_tab(self):
-        """Graph 탭: Observation 그래프들"""
+        """Graph 탭: Observation 그래프들 (3개씩 표시, 스크롤/다음 버튼)"""
+        # 메인 위젯
+        main_widget = QWidget()
+        main_layout = QVBoxLayout(main_widget)
+        
+        # 상단 컨트롤 (이전/다음 버튼)
+        control_layout = QHBoxLayout()
+        self.graph_prev_btn = QPushButton("◀ 이전")
+        self.graph_prev_btn.clicked.connect(self.graph_prev_page)
+        self.graph_next_btn = QPushButton("다음 ▶")
+        self.graph_next_btn.clicked.connect(self.graph_next_page)
+        self.graph_page_label = QLabel("페이지: 1/1")
+        control_layout.addWidget(self.graph_prev_btn)
+        control_layout.addStretch()
+        control_layout.addWidget(self.graph_page_label)
+        control_layout.addStretch()
+        control_layout.addWidget(self.graph_next_btn)
+        main_layout.addLayout(control_layout)
+        
+        # 그래프 표시 영역 (스크롤 없음)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # 스크롤바 제거
         
         content_widget = QWidget()
-        l = QVBoxLayout(content_widget)
-        l.setSpacing(10)
-        l.setContentsMargins(5, 5, 5, 5)
+        self.graph_layout = QVBoxLayout(content_widget)
+        self.graph_layout.setSpacing(10)
+        self.graph_layout.setContentsMargins(5, 5, 5, 5)
         
         # 각 그룹별로 그래프 생성 (obs_groups가 설정된 후에만 생성됨)
         self.obs_figs = {}
         self.obs_canvases = {}
         self.obs_axes = {}
         self.obs_lines = {}
+        self.graph_current_page = 0
+        self.graph_items_per_page = 2
         
         # 초기 메시지 표시
         graph_placeholder = QLabel("PT 파일을 선택하면 Observation 그래프가 표시됩니다.")
         graph_placeholder.setAlignment(Qt.AlignCenter)
         graph_placeholder.setStyleSheet("padding: 50px; color: #666; font-size: 12pt;")
-        l.addWidget(graph_placeholder)
+        self.graph_layout.addWidget(graph_placeholder)
         
-        # obs_groups가 설정되면 그래프 생성 (동적으로 업데이트됨)
-        # 초기에는 빈 상태로 시작, PT 파일 로드 후 업데이트
-        
-        l.addStretch()
+        self.graph_layout.addStretch()
         
         # 컨텐츠 위젯 크기 설정
         content_widget.setMinimumWidth(800)
-        num_groups = len(self.obs_groups)
-        estimated_height = num_groups * (400 + 50)
-        content_widget.setMinimumHeight(estimated_height)
+        content_widget.setMinimumHeight(1100)  # 2개 그래프를 위한 높이
         
         scroll.setWidget(content_widget)
-        return scroll
+        main_layout.addWidget(scroll)
+        
+        return main_widget
+    
+    def graph_prev_page(self):
+        """이전 페이지로 이동"""
+        if self.graph_current_page > 0:
+            self.graph_current_page -= 1
+            self.update_graph_display()
+    
+    def graph_next_page(self):
+        """다음 페이지로 이동"""
+        if self.obs_groups:
+            total_pages = (len(self.obs_groups) + self.graph_items_per_page - 1) // self.graph_items_per_page
+            if self.graph_current_page < total_pages - 1:
+                self.graph_current_page += 1
+                self.update_graph_display()
+    
+    def update_graph_display(self):
+        """현재 페이지에 해당하는 그래프만 표시"""
+        if not self.obs_groups or not hasattr(self, 'graph_layout'):
+            return
+        
+        # 모든 그래프 숨기기
+        for group_name in self.obs_groups.keys():
+            if group_name in self.obs_canvases:
+                self.obs_canvases[group_name].hide()
+        
+        # 현재 페이지의 그래프만 표시
+        group_names = list(self.obs_groups.keys())
+        start_idx = self.graph_current_page * self.graph_items_per_page
+        end_idx = min(start_idx + self.graph_items_per_page, len(group_names))
+        
+        for i in range(start_idx, end_idx):
+            group_name = group_names[i]
+            if group_name in self.obs_canvases:
+                self.obs_canvases[group_name].show()
+        
+        # 페이지 정보 업데이트
+        total_pages = (len(group_names) + self.graph_items_per_page - 1) // self.graph_items_per_page
+        self.graph_page_label.setText(f"페이지: {self.graph_current_page + 1}/{total_pages}")
+        
+        # 버튼 상태 업데이트
+        self.graph_prev_btn.setEnabled(self.graph_current_page > 0)
+        self.graph_next_btn.setEnabled(self.graph_current_page < total_pages - 1)
 
     # =========================
     # BUTTON CALLBACKS
     # =========================
     def open_file_dialog(self):
-        """파일 열기 다이얼로그"""
+        """Policy 파일 열기 다이얼로그"""
         # 기본 경로를 control node의 모델 디렉토리로 설정
         default_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
@@ -562,7 +897,7 @@ class MonitorGUI(QMainWindow):
         
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "모델 파일 선택",
+            "Policy 파일 선택",
             default_path if os.path.exists(default_path) else "",
             "PyTorch Files (*.pt);;ONNX Files (*.onnx);;All Files (*)"
         )
@@ -570,18 +905,19 @@ class MonitorGUI(QMainWindow):
         if file_path:
             self.current_file_path = file_path
             file_name = os.path.basename(file_path)
-            self.current_file_label.setText(f"현재 선택된 파일:\n{file_name}")
+            self.current_file_label.setText(f"Policy 파일:\n{file_name}")
             self.current_file_label.setStyleSheet(
                 "padding: 10px; background-color: #50C878; color: white; "
                 "font-weight: bold; font-size: 11pt; border-radius: 5px;"
             )
-            self.get_logger().info(f"Model file selected: {file_path}")
+            self.get_logger().info(f"Policy file selected: {file_path}")
             
             # Control node에 모델 파일 경로를 실시간으로 전달
             self.ros2_node.publish_model_path(file_path)
             self.get_logger().info(f"Model path published to control node: {file_path}")
             
             # PT 파일 구조 확인 (로컬에서도 확인 가능하도록)
+            # 이 함수 내부에서 A-RMA 모델 여부도 확인함
             self.check_pt_file_structure(file_path)
         else:
             # 파일 선택 취소 시
@@ -590,6 +926,52 @@ class MonitorGUI(QMainWindow):
             self.current_file_label.setStyleSheet(
                 "padding: 10px; background-color: #ff4444; color: white; "
                 "font-weight: bold; font-size: 11pt; border-radius: 5px;"
+            )
+    
+    def open_arma_file_dialog(self):
+        """A-RMA 파일 열기 다이얼로그"""
+        # 기본 경로를 control node의 모델 디렉토리로 설정
+        default_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            'redshow_control', 'redshow_control'
+        )
+        
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "A-RMA Adaptation Module 파일 선택",
+            default_path if os.path.exists(default_path) else "",
+            "PyTorch Files (*.pt);;All Files (*)"
+        )
+        
+        if file_path:
+            self.arma_file_path = file_path
+            file_name = os.path.basename(file_path)
+            self.arma_file_label.setText(f"A-RMA 파일:\n{file_name}")
+            self.arma_file_label.setStyleSheet(
+                "padding: 10px; background-color: #50C878; color: white; "
+                "font-weight: bold; font-size: 11pt; border-radius: 5px;"
+            )
+            self.arma_status_label.setText("A-RMA: ON")
+            self.arma_status_label.setStyleSheet(
+                "padding: 10px; background-color: #4A90E2; color: white; "
+                "font-weight: bold; font-size: 12pt; border-radius: 5px;"
+            )
+            self.get_logger().info(f"A-RMA file selected: {file_path}")
+            
+            # Control node에 A-RMA 파일 경로 전달
+            # TODO: A-RMA 파일 경로를 전달하는 토픽 추가 필요
+        else:
+            # 파일 선택 취소 시
+            self.arma_file_path = None
+            self.arma_file_label.setText("A-RMA 파일이 선택되지 않았습니다.")
+            self.arma_file_label.setStyleSheet(
+                "padding: 10px; background-color: #666; color: white; "
+                "font-weight: bold; font-size: 11pt; border-radius: 5px;"
+            )
+            self.arma_status_label.setText("A-RMA: OFF")
+            self.arma_status_label.setStyleSheet(
+                "padding: 10px; background-color: #666; color: white; "
+                "font-weight: bold; font-size: 12pt; border-radius: 5px;"
             )
 
     def on_manual_mode(self):
@@ -651,11 +1033,77 @@ class MonitorGUI(QMainWindow):
     def on_run(self):
         """RUN/STOP 버튼"""
         if self.current_mode is None:
+            self.show_warning("경고: 모드를 선택해주세요 (Manual 또는 Auto)")
             return
+        
+        # RUN 버튼을 누를 때 검증
+        if not self.is_running:  # RUN 시작 시
+            # 1. Policy 파일이 선택되었는지 확인
+            if not self.current_file_path:
+                self.show_warning("경고: Policy 파일을 선택해주세요.")
+                return
+            
+            # 2. A-RMA 모델인데 A-RMA 파일이 선택되지 않았으면 경고하고 STOP
+            if self.is_arma_model and not self.arma_file_path:
+                self.show_warning("경고: A-RMA 모델이 선택되었지만 A-RMA 파일이 선택되지 않았습니다.\nA-RMA 파일을 선택해주세요.")
+                return
+            
+            # 3. Observation 데이터가 모두 들어왔는지 엄격하게 확인
+            if not hasattr(self, 'obs_index_status') or not self.obs_index_status:
+                self.show_warning("경고: Observation 상태가 초기화되지 않았습니다.\nPT 파일을 다시 선택해주세요.")
+                return
+            
+            if not self.is_arma_model:
+                # 바닐라 모델: 23개 데이터가 모두 ready 상태여야 함
+                required_indices = list(range(23))  # 0-22
+                missing_indices = []
+                for idx in required_indices:
+                    if idx not in self.obs_index_status or not self.obs_index_status[idx].get('ready', False):
+                        missing_indices.append(idx)
+                
+                if missing_indices:
+                    self.show_warning(
+                        f"경고: 필수 Observation 데이터가 부족합니다.\n"
+                        f"부족한 인덱스: {missing_indices[:10]}{'...' if len(missing_indices) > 10 else ''}\n"
+                        f"Control Node가 실행 중이고 데이터를 발행하는지 확인해주세요."
+                    )
+                    return
+            else:
+                # A-RMA 모델: 기본 23개 + extrinsics_obs 8개가 모두 ready 상태여야 함
+                # 기본 23개 확인 (0-22)
+                basic_indices = list(range(23))
+                missing_basic = []
+                for idx in basic_indices:
+                    if idx not in self.obs_index_status or not self.obs_index_status[idx].get('ready', False):
+                        missing_basic.append(idx)
+                
+                # extrinsics_obs 8개 확인 (23-30)
+                missing_extrinsics = []
+                if 'extrinsics_obs' in self.obs_groups:
+                    extrinsics_indices = self.obs_groups['extrinsics_obs']['indices']
+                    for idx in extrinsics_indices:
+                        if idx not in self.obs_index_status or not self.obs_index_status[idx].get('ready', False):
+                            missing_extrinsics.append(idx)
+                else:
+                    missing_extrinsics = list(range(23, 31))  # extrinsics_obs가 없으면 8개 모두 부족
+                
+                if missing_basic or missing_extrinsics:
+                    error_msg = "경고: 필수 Observation 데이터가 부족합니다.\n"
+                    if missing_basic:
+                        error_msg += f"기본 데이터 부족: {len(missing_basic)}개 인덱스\n"
+                    if missing_extrinsics:
+                        error_msg += f"Extrinsics Obs 부족: {len(missing_extrinsics)}개 인덱스\n"
+                    error_msg += "Control Node와 Adaptation Module이 실행 중인지 확인해주세요."
+                    self.show_warning(error_msg)
+                    return
         
         self.is_running = not self.is_running
         cmd = f"{self.current_mode}::{'RUN' if self.is_running else 'STOP'}"
         self.ros2_node.publish_cmd(cmd)
+        
+        # RUN이 성공적으로 시작되면 경고 메시지 숨기기
+        if self.is_running:
+            self.warning_label.hide()
         
         if self.current_mode == "MANUAL":
             if self.is_running:
@@ -687,6 +1135,10 @@ class MonitorGUI(QMainWindow):
     def on_tab_changed(self, index):
         """탭 변경 시 그래프 타이머 시작/중지"""
         if index == 2:  # Graph 탭
+            # Graph 탭이 열릴 때 그래프 위젯 생성
+            if self.obs_groups and len(self.obs_figs) == 0:
+                QTimer.singleShot(200, self.update_graph_widgets)  # 200ms 지연 후 업데이트
+            
             if not self.graph_timer.isActive():
                 self.graph_timer.start(100)  # 10Hz
         else:
@@ -702,6 +1154,19 @@ class MonitorGUI(QMainWindow):
             vals = [s.value() for s in self.manual_inputs]
             self.ros2_node.publish_joint_cmd(vals)
             self.act_buffer.append(vals.copy())
+            
+            # Velocity command도 전송 및 저장
+            if hasattr(self, 'velocity_command_inputs'):
+                vcmd_vals = [s.value() for s in self.velocity_command_inputs]
+                self.velocity_commands = vcmd_vals.copy()
+                self.ros2_node.publish_velocity_command(vcmd_vals)
+    
+    def on_velocity_command_changed(self):
+        """Velocity command 변경 시 호출 (Auto 모드)"""
+        if hasattr(self, 'auto_velocity_command_inputs'):
+            vcmd_vals = [s.value() for s in self.auto_velocity_command_inputs]
+            self.velocity_commands = vcmd_vals.copy()
+            self.ros2_node.publish_velocity_command(vcmd_vals)
 
     def update_ui(self):
         """UI 업데이트 (50Hz)"""
@@ -716,22 +1181,33 @@ class MonitorGUI(QMainWindow):
                 status = self.obs_index_status[idx]
                 label = self.obs_status_labels[group_name][idx]
                 
+                # 현재 값 가져오기
+                current_value = None
+                if idx in self.obs_buffer and len(self.obs_buffer[idx]) > 0:
+                    current_value = self.obs_buffer[idx][-1]
+                
                 if status['ready']:
                     hz = status['hz']
-                    if hz > 0:
-                        label.setText(f"{name}: READY {hz:.1f} Hz")
-                        label.setStyleSheet(
-                            "padding: 3px 5px; background-color: #50C878; color: white; "
-                            "font-size: 9pt; border-radius: 3px;"
-                        )
+                    # 값 표시 형식: "name: value READY Hz" 또는 "name: READY Hz" (값이 없으면)
+                    if current_value is not None:
+                        if hz > 0:
+                            label.setText(f"{name}: {current_value:.4f} READY {hz:.1f} Hz")
+                        else:
+                            label.setText(f"{name}: {current_value:.4f} READY")
                     else:
-                        label.setText(f"{name}: READY")
-                        label.setStyleSheet(
-                            "padding: 3px 5px; background-color: #50C878; color: white; "
-                            "font-size: 9pt; border-radius: 3px;"
-                        )
+                        if hz > 0:
+                            label.setText(f"{name}: READY {hz:.1f} Hz")
+                        else:
+                            label.setText(f"{name}: READY")
+                    label.setStyleSheet(
+                        "padding: 3px 5px; background-color: #50C878; color: white; "
+                        "font-size: 9pt; border-radius: 3px;"
+                    )
                 else:
-                    label.setText(f"{name}: None")
+                    if current_value is not None:
+                        label.setText(f"{name}: {current_value:.4f} None")
+                    else:
+                        label.setText(f"{name}: None")
                     label.setStyleSheet(
                         "padding: 3px 5px; background-color: #ff4444; color: white; "
                         "font-size: 9pt; border-radius: 3px;"
@@ -764,6 +1240,10 @@ class MonitorGUI(QMainWindow):
         times = np.array(list(self.time_buffer))
         
         for group_name, group_info in self.obs_groups.items():
+            # 그래프가 생성되지 않았으면 건너뜀
+            if group_name not in self.obs_axes:
+                continue
+                
             ax = self.obs_axes[group_name]
             lines = self.obs_lines[group_name]
             
@@ -792,45 +1272,514 @@ class MonitorGUI(QMainWindow):
                 self.obs_canvases[group_name].draw()
 
     def check_pt_file_structure(self, pt_path: str):
-        """PT 파일 구조 확인 (GUI에서 직접 확인)"""
+        """PT 파일 구조 확인 및 env.yaml, agent.yaml에서 Observation 정보 추출"""
         if not pt_path.endswith('.pt'):
             return
         
         try:
+            pt_dir = os.path.dirname(pt_path)
+            
+            # 1. PT 파일에서 actor.0.weight shape 확인하여 input_dim 추출
             ckpt = torch.load(pt_path, map_location="cpu")
-            self.get_logger().info("=" * 80)
-            self.get_logger().info(f"[GUI CHECKPOINT INSPECTION] Analyzing file: {pt_path}")
-            self.get_logger().info("=" * 80)
-            
-            # 모든 최상위 키 출력
-            all_keys = list(ckpt.keys())
-            self.get_logger().info(f"[GUI CHECKPOINT] Top-level keys ({len(all_keys)}): {all_keys}")
-            
-            # Observation 관련 키 확인
-            obs_keywords = ['obs', 'observation', 'config', 'cfg', 'group', 'space']
-            found_obs_keys = []
-            for key in all_keys:
-                if any(kw in key.lower() for kw in obs_keywords):
-                    found_obs_keys.append(key)
-            
-            if found_obs_keys:
-                self.get_logger().info(f"[GUI CHECKPOINT] ⚠️  Found potential observation-related keys: {found_obs_keys}")
-                for key in found_obs_keys:
-                    value = ckpt[key]
-                    if isinstance(value, dict):
-                        self.get_logger().info(f"[GUI CHECKPOINT]   {key} content: {list(value.keys())}")
-                        # obs_groups가 있는지 확인
-                        if 'obs_groups' in value:
-                            self.get_logger().info(f"[GUI CHECKPOINT]   ✓ Found obs_groups in {key}!")
-                            # 여기서 obs_groups를 추출하여 GUI에 적용할 수 있음
-                    else:
-                        self.get_logger().info(f"[GUI CHECKPOINT]   {key} type: {type(value)}")
+            actor_weight = ckpt.get("actor.0.weight", None)
+            if actor_weight is not None:
+                input_dim = actor_weight.shape[1]  # (hidden_dim, input_dim)
+                self.get_logger().info(f"[GUI CHECKPOINT] Actor input dimension: {input_dim}")
             else:
-                self.get_logger().info(f"[GUI CHECKPOINT] ❌ No observation-related keys found")
+                self.get_logger().warn("[GUI CHECKPOINT] Could not find actor.0.weight in checkpoint")
+                input_dim = None
             
-            self.get_logger().info("=" * 80)
+            # 2. 같은 폴더에서 env.yaml, agent.yaml 찾기
+            env_yaml_path = os.path.join(pt_dir, "env.yaml")
+            agent_yaml_path = os.path.join(pt_dir, "agent.yaml")
+            
+            obs_config = None
+            
+            # env.yaml 읽기
+            if os.path.exists(env_yaml_path):
+                self.get_logger().info(f"[GUI CHECKPOINT] Found env.yaml: {env_yaml_path}")
+                try:
+                    # observations.policy 섹션만 추출하여 파싱 (Python tuple/slice 문제 회피)
+                    policy_obs = self.extract_policy_observations(env_yaml_path)
+                    
+                    if policy_obs:
+                        self.get_logger().info(f"[GUI CHECKPOINT] Policy observations: {list(policy_obs.keys())}")
+                        
+                        # Observation Group 구성
+                        obs_config = self.build_obs_groups_from_yaml(policy_obs, input_dim)
+                        
+                        if obs_config:
+                            self.obs_groups = obs_config['obs_groups']
+                            self.num_actor_obs = obs_config.get('num_actor_obs', input_dim or 23)
+                            self.get_logger().info(f"[GUI CHECKPOINT] ✓ Observation groups loaded: {list(self.obs_groups.keys())}")
+                            
+                            # A-RMA 모델인지 확인 (extrinsics_obs가 있는지 확인)
+                            if 'extrinsics_obs' in self.obs_groups:
+                                self.is_arma_model = True
+                                self.get_logger().info("[GUI CHECKPOINT] This is an A-RMA model (extrinsics_obs found)")
+                            else:
+                                self.is_arma_model = False
+                                self.get_logger().info("[GUI CHECKPOINT] This is a Vanilla model (no extrinsics_obs)")
+                            
+                            # UI 업데이트
+                            self.update_obs_ui()
+                except Exception as e:
+                    self.get_logger().error(f"[GUI CHECKPOINT] Failed to parse env.yaml: {e}")
+            else:
+                self.get_logger().warn(f"[GUI CHECKPOINT] env.yaml not found in {pt_dir}")
+            
+            # agent.yaml 읽기 (추가 정보가 있을 수 있음)
+            if os.path.exists(agent_yaml_path):
+                self.get_logger().info(f"[GUI CHECKPOINT] Found agent.yaml: {agent_yaml_path}")
+                try:
+                    with open(agent_yaml_path, 'r') as f:
+                        agent_config = yaml.safe_load(f)
+                    # 필요시 agent.yaml에서 추가 정보 추출 가능
+                except Exception as e:
+                    self.get_logger().warn(f"[GUI CHECKPOINT] Failed to parse agent.yaml: {e}")
+            
+            # PT 파일 구조 확인 (디버깅용)
+            all_keys = list(ckpt.keys())
+            self.get_logger().info(f"[GUI CHECKPOINT] Checkpoint keys ({len(all_keys)}): {all_keys[:10]}...")
+            
         except Exception as e:
             self.get_logger().error(f"[GUI CHECKPOINT] Failed to inspect PT file: {e}")
+    
+    
+    def extract_policy_observations(self, yaml_path: str):
+        """env.yaml에서 observations.policy 섹션만 추출 (Python tuple/slice 문제 회피)"""
+        try:
+            with open(yaml_path, 'r') as f:
+                lines = f.readlines()
+            
+            # observations.policy 섹션 찾기
+            in_observations = False
+            in_policy = False
+            observations_indent = None
+            policy_indent = None
+            policy_obs = {}
+            current_obs_name = None
+            
+            for line in lines:
+                stripped = line.strip()
+                if not stripped or stripped.startswith('#'):
+                    continue
+                
+                current_indent = len(line) - len(line.lstrip())
+                
+                # observations: 시작
+                if stripped.startswith('observations:'):
+                    in_observations = True
+                    observations_indent = current_indent
+                    continue
+                
+                # policy: 시작
+                if in_observations and stripped.startswith('policy:'):
+                    in_policy = True
+                    policy_indent = current_indent
+                    continue
+                
+                # policy 섹션 내부의 observation 항목들 추출
+                if in_policy:
+                    # policy 섹션이 끝났는지 확인
+                    if stripped and current_indent <= observations_indent:
+                        break
+                    
+                    # observation 항목 이름 추출 (policy_indent보다 한 단계 더 들여쓰기된 것들)
+                    if current_indent == policy_indent + 2 and ':' in stripped:
+                        key = stripped.split(':')[0].strip()
+                        # 메타데이터 키가 아닌 실제 observation 이름만
+                        # base_lin_vel은 제거 (사용하지 않음)
+                        if key not in ['concatenate_terms', 'enable_corruption', 'history_length', 
+                                      'flatten_history_dim', 'func', 'params', 'modifiers', 
+                                      'noise', 'clip', 'scale', 'base_lin_vel']:
+                            if key:
+                                policy_obs[key] = {}
+                                current_obs_name = key
+                                self.get_logger().info(f"[GUI CHECKPOINT] Found observation: {key}")
+            
+            if not policy_obs:
+                self.get_logger().warn("[GUI CHECKPOINT] Could not find any observations in policy section")
+                return None
+            
+            return policy_obs
+                
+        except Exception as e:
+            self.get_logger().error(f"[GUI CHECKPOINT] Failed to extract policy observations: {e}")
+            return None
+    
+    def build_obs_groups_from_yaml(self, policy_obs: dict, total_dim: int = None):
+        """env.yaml의 policy observations에서 Observation Group 구성
+        - base_lin_vel은 제거
+        - extrinsics_obs는 마지막 인덱스로 이동
+        - 기본 23개 observation은 앞에서부터 순차적으로 매핑
+        - extrinsics_obs는 마지막 8개 인덱스에 매핑 (A-RMA 모델인 경우)
+        """
+        # 각 Observation 항목의 기본 차원 정의
+        DEFAULT_DIMS = {
+            'extrinsics_obs': 8,  # A-RMA 모델의 경우 마지막에 추가
+            'leg_position': 4,
+            'wheel_velocity': 2,
+            'base_ang_vel': 3,
+            'velocity_commands': 4,
+            'base_quat': 4,
+            'actions': 6,
+        }
+        
+        # base_lin_vel 제거 및 extrinsics_obs 분리
+        filtered_obs = {}
+        extrinsics_obs_config = None
+        
+        for obs_name, obs_config in policy_obs.items():
+            if obs_name == 'base_lin_vel':
+                continue  # base_lin_vel 제거
+            elif obs_name == 'extrinsics_obs':
+                extrinsics_obs_config = (obs_name, obs_config)  # 나중에 처리
+            else:
+                filtered_obs[obs_name] = obs_config
+        
+        obs_groups = {}
+        current_idx = 0
+        unknown_dims = []
+        
+        # Control Node가 보내는 기본 23개 데이터를 채울 시작 인덱스 (앞에서부터 순차적으로)
+        control_data_idx = 0
+        
+        # 기본 observation들을 먼저 처리 (extrinsics_obs 제외)
+        for obs_name, obs_config in filtered_obs.items():
+            dim = None
+            
+            if isinstance(obs_config, dict):
+                # 차원 정보가 직접 있는 경우
+                dim = obs_config.get('dim', None)
+                if dim is None:
+                    # shape 정보가 있는 경우
+                    shape = obs_config.get('shape', None)
+                    if shape:
+                        if isinstance(shape, list):
+                            dim = int(np.prod(shape))
+                        else:
+                            dim = int(shape)
+            
+            # 차원 정보가 없으면 기본값 사용
+            if dim is None:
+                dim = DEFAULT_DIMS.get(obs_name, None)
+                if dim is None:
+                    # 차원을 모르는 경우 unknown_dims에 추가
+                    unknown_dims.append(obs_name)
+                    self.get_logger().info(
+                        f"[GUI CHECKPOINT] Unknown dimension for {obs_name}, will infer from remaining dimensions"
+                    )
+                    continue
+                elif dim == 0:
+                    # 차원이 0인 경우도 unknown_dims에 추가 (나중에 역추정)
+                    unknown_dims.append(obs_name)
+                    self.get_logger().info(
+                        f"[GUI CHECKPOINT] {obs_name} has dim=0, will infer from remaining dimensions"
+                    )
+                    continue
+            
+            dim = int(dim)
+            
+            # 인덱스 범위 생성
+            indices = list(range(current_idx, current_idx + dim))
+            names = [f"{obs_name}[{i}]" for i in range(dim)]
+            
+            # Control Node 데이터 매핑 정보 추가
+            # Control Node가 보내는 데이터는 앞에서부터 순차적으로 채움 (어떤 observation이든 상관없이)
+            control_start_idx = control_data_idx
+            control_data_idx += dim
+            
+            obs_groups[obs_name] = {
+                'names': names,
+                'indices': indices,
+                'control_start_idx': control_start_idx  # Control Node에서 오는 데이터의 시작 인덱스 (없으면 None)
+            }
+            
+            current_idx += dim
+            
+            self.get_logger().info(
+                f"[GUI CHECKPOINT] {obs_name}: dim={dim}, indices={indices[0]}-{indices[-1]}, "
+                f"control_data_idx={control_start_idx}-{control_start_idx+dim-1}"
+            )
+        
+        # extrinsics_obs를 마지막에 추가 (A-RMA 모델인 경우)
+        if extrinsics_obs_config:
+            obs_name, obs_config = extrinsics_obs_config
+            dim = None
+            
+            if isinstance(obs_config, dict):
+                dim = obs_config.get('dim', None)
+                if dim is None:
+                    shape = obs_config.get('shape', None)
+                    if shape:
+                        if isinstance(shape, list):
+                            dim = int(np.prod(shape))
+                        else:
+                            dim = int(shape)
+            
+            if dim is None:
+                dim = DEFAULT_DIMS.get(obs_name, 8)
+            
+            dim = int(dim)
+            
+            # 마지막 인덱스에 추가
+            indices = list(range(current_idx, current_idx + dim))
+            names = [f"{obs_name}[{i}]" for i in range(dim)]
+            
+            # extrinsics_obs는 Control Node 데이터의 마지막 8개에 매핑
+            # 기본 23개가 먼저 채워지고, 그 다음에 extrinsics_obs 8개가 옴
+            control_start_idx = control_data_idx  # 기본 23개 이후부터 시작
+            
+            obs_groups[obs_name] = {
+                'names': names,
+                'indices': indices,
+                'control_start_idx': control_start_idx
+            }
+            
+            current_idx += dim
+            control_data_idx += dim
+            
+            self.get_logger().info(
+                f"[GUI CHECKPOINT] {obs_name}: dim={dim}, indices={indices[0]}-{indices[-1]}, "
+                f"control_data_idx={control_start_idx}-{control_start_idx+dim-1} (마지막에 추가됨)"
+            )
+        
+        # 알 수 없는 차원이 있고 total_dim이 있으면 역추정
+        if unknown_dims and total_dim is not None:
+            remaining_dim = total_dim - current_idx
+            if remaining_dim > 0:
+                self.get_logger().info(
+                    f"[GUI CHECKPOINT] Inferring dimensions for {unknown_dims}: "
+                    f"remaining {remaining_dim} dimensions"
+                )
+                # 남은 차원을 알 수 없는 항목들에 분배
+                if len(unknown_dims) == 1:
+                    # 하나만 있으면 모두 할당
+                    obs_name = unknown_dims[0]
+                    dim = remaining_dim
+                    indices = list(range(current_idx, current_idx + dim))
+                    names = [f"{obs_name}[{j}]" for j in range(dim)]
+                    
+                    obs_groups[obs_name] = {
+                        'names': names,
+                        'indices': indices
+                    }
+                    
+                    current_idx += dim
+                    self.get_logger().info(
+                        f"[GUI CHECKPOINT] {obs_name}: inferred dim={dim}, "
+                        f"indices={indices[0]}-{indices[-1]}"
+                    )
+                else:
+                    # 여러 개면 균등 분배
+                    dim_per_item = remaining_dim // len(unknown_dims)
+                    for i, obs_name in enumerate(unknown_dims):
+                        if i == len(unknown_dims) - 1:
+                            # 마지막 항목이 나머지 모두 가져감
+                            dim = remaining_dim - (dim_per_item * i)
+                        else:
+                            dim = dim_per_item
+                        
+                        indices = list(range(current_idx, current_idx + dim))
+                        names = [f"{obs_name}[{j}]" for j in range(dim)]
+                        
+                        obs_groups[obs_name] = {
+                            'names': names,
+                            'indices': indices
+                        }
+                        
+                        current_idx += dim
+                        self.get_logger().info(
+                            f"[GUI CHECKPOINT] {obs_name}: inferred dim={dim}, "
+                            f"indices={indices[0]}-{indices[-1]}"
+                        )
+        
+        # 총 차원 확인
+        if total_dim is not None:
+            if current_idx != total_dim:
+                self.get_logger().warn(
+                    f"[GUI CHECKPOINT] Dimension mismatch: "
+                    f"calculated {current_idx} vs checkpoint {total_dim}"
+                )
+            else:
+                self.get_logger().info(
+                    f"[GUI CHECKPOINT] ✓ Total dimensions match: {current_idx}"
+                )
+        
+        if not obs_groups:
+            return None
+        
+        return {
+            'obs_groups': obs_groups,
+            'num_actor_obs': current_idx if total_dim is None else total_dim
+        }
+    
+    def update_obs_ui(self):
+        """Observation Group 정보가 업데이트되면 UI 재구성"""
+        # Observation Status 영역 재구성
+        if hasattr(self, 'obs_status_container'):
+            # 기존 위젯 제거
+            for i in reversed(range(self.obs_status_layout.count())):
+                item = self.obs_status_layout.itemAt(i)
+                if item.widget():
+                    item.widget().deleteLater()
+            
+            # 새로운 Observation Group 표시
+            self.obs_status_labels = {}
+            for group_name, group_info in self.obs_groups.items():
+                group_label = QLabel(f"<b>{group_name.upper()}</b>")
+                group_label.setStyleSheet("font-size: 11pt; font-weight: bold; padding: 5px;")
+                self.obs_status_layout.addWidget(group_label)
+                
+                self.obs_status_labels[group_name] = {}
+                for i, idx in enumerate(group_info['indices']):
+                    name = group_info['names'][i]
+                    status_label = QLabel(f"{name}: None")
+                    status_label.setStyleSheet(
+                        "padding: 3px 5px; background-color: #ff4444; color: white; "
+                        "font-size: 9pt; border-radius: 3px;"
+                    )
+                    self.obs_status_layout.addWidget(status_label)
+                    self.obs_status_labels[group_name][idx] = status_label
+            
+            # Observation 인덱스 상태 초기화
+            self.obs_index_status = {}
+            self.obs_index_hz_buffers = {}
+            for group_name, group_info in self.obs_groups.items():
+                for idx in group_info['indices']:
+                    self.obs_index_status[idx] = {'ready': False, 'last_time': None, 'hz': 0.0}
+                    self.obs_index_hz_buffers[idx] = deque(maxlen=50)
+                    if idx not in self.obs_buffer:
+                        self.obs_buffer[idx] = deque(maxlen=self.max_history)
+        
+        # Graph 탭은 나중에 탭이 열릴 때 업데이트 (지금은 건너뜀)
+        # QTimer.singleShot(100, self.update_graph_widgets)
+        
+        self.get_logger().info("[GUI] Observation UI updated")
+    
+    def update_graph_widgets(self):
+        """Graph 탭의 그래프 위젯 생성/업데이트"""
+        try:
+            if not self.obs_groups:
+                return
+            
+            # tab_widget이 아직 생성되지 않았으면 건너뜀
+            if not hasattr(self, 'tab_widget') or self.tab_widget is None:
+                return
+            
+            # Graph 탭의 content_widget 찾기
+            if self.tab_widget.count() < 3:
+                return
+            
+            graph_tab = self.tab_widget.widget(2)  # Graph 탭은 인덱스 2
+            if graph_tab is None:
+                return
+            
+            # graph_tab은 이제 QWidget (메인 위젯)
+            # 내부에 QScrollArea가 있음
+            if not isinstance(graph_tab, QWidget):
+                return
+            
+            # ScrollArea 찾기
+            scroll_area = None
+            for child in graph_tab.findChildren(QScrollArea):
+                scroll_area = child
+                break
+            
+            if scroll_area is None:
+                return
+            
+            content_widget = scroll_area.widget()
+            if content_widget is None:
+                return
+            
+            layout = content_widget.layout()
+            if layout is None:
+                return
+            
+            # graph_layout이 없으면 설정
+            if not hasattr(self, 'graph_layout'):
+                self.graph_layout = layout
+            
+            # 기존 그래프 위젯 제거
+            for group_name in list(self.obs_figs.keys()):
+                if group_name in self.obs_canvases:
+                    canvas = self.obs_canvases[group_name]
+                    if canvas:
+                        canvas.setParent(None)
+                        layout.removeWidget(canvas)
+                        canvas.deleteLater()
+                if group_name in self.obs_figs:
+                    del self.obs_figs[group_name]
+                if group_name in self.obs_canvases:
+                    del self.obs_canvases[group_name]
+                if group_name in self.obs_axes:
+                    del self.obs_axes[group_name]
+                if group_name in self.obs_lines:
+                    del self.obs_lines[group_name]
+            
+            # 기존 placeholder 제거
+            widgets_to_remove = []
+            for i in reversed(range(layout.count())):
+                item = layout.itemAt(i)
+                if item and item.widget():
+                    widget = item.widget()
+                    if isinstance(widget, QLabel) and "PT 파일을 선택하면" in widget.text():
+                        widgets_to_remove.append((widget, item))
+            
+            for widget, item in widgets_to_remove:
+                try:
+                    layout.removeItem(item)
+                    widget.setParent(None)
+                    widget.deleteLater()
+                except Exception as e:
+                    self.get_logger().warn(f"[GUI] Error removing placeholder: {e}")
+            
+            # 각 observation group에 대해 그래프 생성
+            for group_name, group_info in self.obs_groups.items():
+                try:
+                    # Figure 생성
+                    fig = Figure(figsize=(10, 4))
+                    canvas = FigureCanvas(fig)
+                    ax = fig.add_subplot(111)
+                    
+                    # 라인 생성
+                    lines = []
+                    colors = plt.cm.tab10(np.linspace(0, 1, len(group_info['indices'])))
+                    for i, idx in enumerate(group_info['indices']):
+                        line, = ax.plot([], [], label=group_info['names'][i], color=colors[i])
+                        lines.append(line)
+                    
+                    ax.set_title(f"{group_name.upper()}", fontsize=12, fontweight='bold')
+                    ax.set_xlabel("Time (s)")
+                    ax.set_ylabel("Value")
+                    ax.legend(loc='upper right', fontsize=8)
+                    ax.grid(True, alpha=0.3)
+                    
+                    # 저장
+                    self.obs_figs[group_name] = fig
+                    self.obs_canvases[group_name] = canvas
+                    self.obs_axes[group_name] = ax
+                    self.obs_lines[group_name] = lines
+                    
+                    # 레이아웃에 추가
+                    layout.addWidget(canvas)
+                    # 초기에는 숨김 (페이지별로 표시)
+                    canvas.hide()
+                except Exception as e:
+                    self.get_logger().error(f"[GUI] Error creating graph for {group_name}: {e}", exc_info=False)
+                    continue
+            
+            layout.addStretch()
+            
+            # 그래프 표시 업데이트
+            self.update_graph_display()
+            
+        except Exception as e:
+            self.get_logger().error(f"[GUI] Error updating graph widgets: {e}", exc_info=False)
+            import traceback
+            self.get_logger().error(f"[GUI] Traceback: {traceback.format_exc()}")
     
     def get_logger(self):
         """로거 반환"""

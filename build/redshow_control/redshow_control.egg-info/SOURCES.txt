@@ -2,7 +2,10 @@ package.xml
 setup.cfg
 setup.py
 redshow_control/__init__.py
+redshow_control/bno085_test_node.py
 redshow_control/redshow_control_node.py
+redshow_control/test_adaptation_module_publisher.py
+redshow_control/test_feedback_publisher.py
 redshow_control.egg-info/PKG-INFO
 redshow_control.egg-info/SOURCES.txt
 redshow_control.egg-info/dependency_links.txt
