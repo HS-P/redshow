@@ -12,6 +12,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.executors import SingleThreadedExecutor
 from std_msgs.msg import String, Float64MultiArray
+import json
 
 from rsl_rl.modules import ActorCritic
 
@@ -23,7 +24,10 @@ class BerkeleyControlNode(Node):
         # ────────────── ROS2 I/O ──────────────
         self.cmd_sub = self.create_subscription(String, 'redshow/cmd', self.cmd_callback, 10)
         self.manual_sub = self.create_subscription(Float64MultiArray, 'redshow/joint_cmd', self.manual_callback, 10)
+        self.model_path_sub = self.create_subscription(String, 'redshow/model_path', self.model_path_callback, 10)
         self.feedback_pub = self.create_publisher(Float64MultiArray, 'redshow/feedback', 10)
+        self.policy_hz_pub = self.create_publisher(Float64MultiArray, 'redshow/policy_hz', 10)
+        self.shutdown_pub = self.create_publisher(String, 'redshow/shutdown', 10)
 
         # ────────────── Device ──────────────
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -39,6 +43,7 @@ class BerkeleyControlNode(Node):
         else:
             pt_path = os.path.join(os.path.dirname(__file__), policy_name)
 
+        # Policy 초기화
         self.policy = ActorCritic(
             num_actor_obs=23, num_critic_obs=23, num_actions=6,
             actor_hidden_dims=[128, 128, 128],
@@ -47,18 +52,11 @@ class BerkeleyControlNode(Node):
             init_noise_std=0.0
         )
 
-        if not os.path.exists(pt_path):
-            self.get_logger().error(f"Policy file not found: {pt_path}")
-            raise FileNotFoundError(f"Policy file not found: {pt_path}")
+        # 초기 모델 로드
+        self.load_policy(pt_path)
 
-        ckpt = torch.load(pt_path, map_location="cpu")
-        state_dict = ckpt.get("model_state_dict", ckpt)
-        actor_state = {k: v for k, v in state_dict.items() if k.startswith("actor")}
-        self.policy.load_state_dict(actor_state, strict=False)
-        self.policy.eval()
-        self.policy.to(self.device)
-
-        self.get_logger().info(f"✓ Policy loaded: {pt_path} (from parameter: {policy_name})")
+        # 현재 모델 경로 저장
+        self.current_policy_path = pt_path
 
         # ────────────── Control params ──────────────
         self.ENC_PER_RAD = 651.89865
@@ -80,6 +78,11 @@ class BerkeleyControlNode(Node):
         self.auto_debug_last_time = time.time()
         self.auto_debug_hz_counter = 0
         self.auto_debug_hz_start_time = time.time()
+        
+        # Policy Hz tracking
+        self.policy_hz_counter = 0
+        self.policy_hz_start_time = time.time()
+        self.current_policy_hz = 0.0
 
         # current_act MUST ALWAYS be "converted act" that matches firmware expectations:
         # [wheel_L, wheel_R, upper_L, upper_R, lower_L, lower_R] with PI offsets
@@ -87,6 +90,11 @@ class BerkeleyControlNode(Node):
 
         # Mode state
         self.mode = "STOP"  # "MANUAL::RUN", "AUTO::RUN", "MANUAL::STOP", "AUTO::STOP", etc.
+        
+        # Policy Hz 초기화 (STOP 상태일 때 0으로 publish)
+        hz_msg = Float64MultiArray()
+        hz_msg.data = [0.0]
+        self.policy_hz_pub.publish(hz_msg)
 
         # ────────────── Serial ──────────────
         try:
@@ -141,6 +149,11 @@ class BerkeleyControlNode(Node):
         # Any STOP -> go neutral immediately (one-shot)
         if "STOP" in self.mode:
             self.to_neutral()
+            # Policy Hz를 0으로 설정
+            self.current_policy_hz = 0.0
+            hz_msg = Float64MultiArray()
+            hz_msg.data = [0.0]
+            self.policy_hz_pub.publish(hz_msg)
 
     def manual_callback(self, msg: Float64MultiArray):
         """Manual 명령 콜백: 반드시 6D, finite, then convert to firmware-space."""
@@ -166,6 +179,132 @@ class BerkeleyControlNode(Node):
         # Only apply to output when MANUAL::RUN
         if self.mode == "MANUAL::RUN":
             self.current_act = self.convert_act(self.manual_act)
+
+    def model_path_callback(self, msg: String):
+        """모델 파일 경로 콜백: 실시간 모델 로딩"""
+        model_path = msg.data.strip()
+        
+        if not model_path:
+            self.get_logger().warn("[MODEL] Empty model path received. Ignoring.")
+            return
+        
+        # 같은 경로면 무시
+        if model_path == self.current_policy_path:
+            self.get_logger().info(f"[MODEL] Same model path: {model_path}. Skipping reload.")
+            return
+        
+        # 파일 존재 확인
+        if not os.path.exists(model_path):
+            self.get_logger().error(f"[MODEL] Model file not found: {model_path}")
+            return
+        
+        # 파일 확장자 확인 (.pt만 지원)
+        if not model_path.endswith('.pt'):
+            self.get_logger().warn(f"[MODEL] Only .pt files are supported. Received: {model_path}")
+            return
+        
+        self.get_logger().info(f"[MODEL] Loading new model: {model_path}")
+        
+        # AUTO 모드 실행 중이면 일시 중지
+        was_auto_running = (self.mode == "AUTO::RUN")
+        if was_auto_running:
+            self.get_logger().info("[MODEL] Temporarily stopping AUTO mode for model reload...")
+            self.mode = "AUTO::STOP"
+            self.to_neutral()
+        
+        # 모델 로드 시도
+        try:
+            self.load_policy(model_path)
+            self.current_policy_path = model_path
+            self.get_logger().info(f"✓ Model loaded successfully: {model_path}")
+            
+            # AUTO 모드가 실행 중이었으면 다시 시작 (사용자가 RUN 버튼을 다시 눌러야 함)
+            if was_auto_running:
+                self.get_logger().info("[MODEL] Model reloaded. Please press RUN button to resume AUTO mode.")
+        except Exception as e:
+            self.get_logger().error(f"[MODEL] Failed to load model: {e}", exc_info=True)
+            if was_auto_running:
+                self.get_logger().warn("[MODEL] Previous model remains active. AUTO mode stopped.")
+    
+    def load_policy(self, pt_path: str):
+        """모델 로드 함수 (재사용 가능)"""
+        if not os.path.exists(pt_path):
+            raise FileNotFoundError(f"Policy file not found: {pt_path}")
+        
+        # 모델 로드
+        ckpt = torch.load(pt_path, map_location="cpu")
+        state_dict = ckpt.get("model_state_dict", ckpt)
+        actor_state = {k: v for k, v in state_dict.items() if k.startswith("actor")}
+        
+        # 기존 policy에 로드
+        self.policy.load_state_dict(actor_state, strict=False)
+        self.policy.eval()
+        self.policy.to(self.device)
+        
+        # 액션 초기화 (새 모델에 맞게)
+        self.prev_act = torch.zeros(6, device=self.device)
+        self.smoothed_act = torch.zeros(6, device=self.device)
+        
+        # PT 파일 구조 확인 (Observation Group 정보가 있는지 확인)
+        self.inspect_checkpoint_structure(ckpt, pt_path)
+        
+        self.get_logger().info(f"✓ Policy loaded: {pt_path}")
+    
+    def inspect_checkpoint_structure(self, ckpt: dict, pt_path: str):
+        """PT/ONNX 파일 구조 확인 - Observation Group 정보가 있는지 확인"""
+        self.get_logger().info("=" * 80)
+        self.get_logger().info(f"[CHECKPOINT INSPECTION] Analyzing file: {pt_path}")
+        self.get_logger().info("=" * 80)
+        
+        # 1. 모든 최상위 키 출력
+        all_keys = list(ckpt.keys())
+        self.get_logger().info(f"[CHECKPOINT] Top-level keys ({len(all_keys)}): {all_keys}")
+        
+        # 2. 각 키의 타입과 내용 일부 확인
+        for key in all_keys:
+            value = ckpt[key]
+            value_type = type(value).__name__
+            
+            if isinstance(value, dict):
+                sub_keys = list(value.keys())[:20]  # 처음 20개만
+                self.get_logger().info(f"[CHECKPOINT]   {key}: dict with {len(value)} keys (showing first 20): {sub_keys}")
+                
+                # Observation 관련 키가 있는지 확인
+                obs_related = [k for k in sub_keys if 'obs' in k.lower() or 'observation' in k.lower()]
+                if obs_related:
+                    self.get_logger().info(f"[CHECKPOINT]     ⚠️  Found observation-related keys: {obs_related}")
+            elif isinstance(value, (list, tuple)):
+                self.get_logger().info(f"[CHECKPOINT]   {key}: {value_type} with length {len(value)}")
+            elif isinstance(value, torch.Tensor):
+                self.get_logger().info(f"[CHECKPOINT]   {key}: Tensor with shape {value.shape}")
+            else:
+                # 작은 값만 출력 (너무 크면 생략)
+                str_value = str(value)
+                if len(str_value) > 200:
+                    str_value = str_value[:200] + "..."
+                self.get_logger().info(f"[CHECKPOINT]   {key}: {value_type} = {str_value}")
+        
+        # 3. Observation Group 관련 키 직접 확인
+        obs_keywords = ['obs', 'observation', 'config', 'cfg', 'group', 'space']
+        found_obs_keys = []
+        for key in all_keys:
+            if any(kw in key.lower() for kw in obs_keywords):
+                found_obs_keys.append(key)
+        
+        if found_obs_keys:
+            self.get_logger().info(f"[CHECKPOINT] ⚠️  Found potential observation-related keys: {found_obs_keys}")
+            for key in found_obs_keys:
+                value = ckpt[key]
+                if isinstance(value, dict):
+                    self.get_logger().info(f"[CHECKPOINT]   {key} content: {list(value.keys())}")
+                else:
+                    self.get_logger().info(f"[CHECKPOINT]   {key} content: {str(value)[:500]}")
+        else:
+            self.get_logger().info(f"[CHECKPOINT] ❌ No observation-related keys found in top-level")
+        
+        self.get_logger().info("=" * 80)
+        self.get_logger().info("[CHECKPOINT INSPECTION] Analysis complete. Check logs above for observation group information.")
+        self.get_logger().info("=" * 80)
 
     # ─────────────────────────────
     # Sensor loop (200 Hz)
@@ -283,20 +422,27 @@ class BerkeleyControlNode(Node):
                 # convert to firmware-space (Auto 모드이므로 wheel에 30배 적용)
                 self.current_act = self.convert_act(self.smoothed_act, is_auto=True)
                 
-                # Auto mode 디버깅: 1초마다 Hz와 명령 출력
-                self.auto_debug_hz_counter += 1
+                # Policy Hz 계산 및 publish
+                self.policy_hz_counter += 1
                 current_time_debug = time.time()
-                elapsed = current_time_debug - self.auto_debug_hz_start_time
+                elapsed = current_time_debug - self.policy_hz_start_time
                 if elapsed >= 1.0:
-                    hz = self.auto_debug_hz_counter / elapsed
+                    self.current_policy_hz = self.policy_hz_counter / elapsed
+                    self.policy_hz_counter = 0
+                    self.policy_hz_start_time = current_time_debug
+                    
+                    # Policy Hz publish
+                    hz_msg = Float64MultiArray()
+                    hz_msg.data = [self.current_policy_hz]
+                    self.policy_hz_pub.publish(hz_msg)
+                    
+                    # Auto mode 디버깅: 1초마다 Hz와 명령 출력
                     self.get_logger().info(
-                        f"[AUTO_DEBUG] Policy Hz: {hz:.1f}, "
+                        f"[AUTO_DEBUG] Policy Hz: {self.current_policy_hz:.1f}, "
                         f"Raw act: {[f'{x:.3f}' for x in act.tolist()]}, "
                         f"Converted: {[f'{x:.3f}' for x in self.current_act.tolist()]}, "
                         f"obs_buffer: {len(self.obs_buffer)}"
                     )
-                    self.auto_debug_hz_counter = 0
-                    self.auto_debug_hz_start_time = current_time_debug
 
             # MANUAL::RUN: output updated in manual_callback
             # STOP: handled by cmd_callback -> to_neutral()
@@ -322,6 +468,8 @@ class BerkeleyControlNode(Node):
 
             # Always publish feedback
             self.publish_feedback()
+            
+            # Policy Hz는 policy_loop에서만 publish (중복 방지)
 
     # ─────────────────────────────
     # Helpers
@@ -360,10 +508,24 @@ class BerkeleyControlNode(Node):
             )
 
     def publish_feedback(self):
+        # obs_buffer가 비어있으면 0으로 채워진 데이터 publish
+        # (GUI에서 Observation Status가 "None"으로 표시되도록)
         if len(self.obs_buffer) >= 1:
             avg = [sum(s[i] for s in self.obs_buffer) / len(self.obs_buffer) for i in range(16)]
         else:
+            # obs_buffer가 비어있으면 0으로 채운 데이터 publish
+            # 이렇게 하면 GUI에서 데이터가 없다는 것을 알 수 있음
             avg = [0.0] * 16
+            # 디버깅: obs_buffer가 비어있을 때 로그 출력 (5초마다)
+            if not hasattr(self, '_last_empty_buffer_log_time'):
+                self._last_empty_buffer_log_time = time.time()
+            current_time = time.time()
+            if current_time - self._last_empty_buffer_log_time > 5.0:
+                self.get_logger().warn(
+                    f"[FEEDBACK] obs_buffer is empty (size: {len(self.obs_buffer)}). "
+                    f"No sensor data received. Check serial port connection (/dev/ttyACM0)."
+                )
+                self._last_empty_buffer_log_time = current_time
 
         (U_posL, U_posR, L_posL, L_posR, wL, wR,
          gx, gy, gz, ax, ay, az, qw, qx, qy, qz) = avg
@@ -396,6 +558,16 @@ class BerkeleyControlNode(Node):
 
     def destroy_node(self):
         self.running = False
+        
+        # GUI에 종료 신호 전송
+        try:
+            shutdown_msg = String()
+            shutdown_msg.data = "shutdown"
+            self.shutdown_pub.publish(shutdown_msg)
+            time.sleep(0.1)  # 메시지 전송 대기
+        except Exception as e:
+            self.get_logger().warn(f"Failed to send shutdown signal: {e}")
+        
         try:
             self.serial.close()
         except Exception:

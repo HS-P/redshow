@@ -1,1 +1,1 @@
-/home/pi/ros2_ws/src/redshow_gui/setup.py
+/home/hansol/redshow/src/redshow_gui/setup.py

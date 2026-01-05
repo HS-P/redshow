@@ -1,0 +1,22 @@
+running develop
+running egg_info
+creating redshow_gui.egg-info
+writing redshow_gui.egg-info/PKG-INFO
+writing dependency_links to redshow_gui.egg-info/dependency_links.txt
+writing entry points to redshow_gui.egg-info/entry_points.txt
+writing requirements to redshow_gui.egg-info/requires.txt
+writing top-level names to redshow_gui.egg-info/top_level.txt
+writing manifest file 'redshow_gui.egg-info/SOURCES.txt'
+reading manifest file 'redshow_gui.egg-info/SOURCES.txt'
+writing manifest file 'redshow_gui.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/hansol/redshow/install/redshow_gui/lib/python3.10/site-packages/redshow-gui.egg-link (link to .)
+Installing redshow_gui script to /home/hansol/redshow/install/redshow_gui/lib/redshow_gui
+
+Installed /home/hansol/redshow/build/redshow_gui
+running symlink_data
+creating /home/hansol/redshow/install/redshow_gui/share/ament_index
+creating /home/hansol/redshow/install/redshow_gui/share/ament_index/resource_index
+creating /home/hansol/redshow/install/redshow_gui/share/ament_index/resource_index/packages
+symbolically linking /home/hansol/redshow/build/redshow_gui/resource/redshow_gui -> /home/hansol/redshow/install/redshow_gui/share/ament_index/resource_index/packages
+symbolically linking /home/hansol/redshow/build/redshow_gui/package.xml -> /home/hansol/redshow/install/redshow_gui/share/redshow_gui

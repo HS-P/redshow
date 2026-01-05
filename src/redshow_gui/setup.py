@@ -15,9 +15,9 @@ setup(
     ],
     install_requires=[
         'setuptools',
-        'PyQt5',
+        'PySide6',
         'torch',
-        'matplotlib',
+        'matplotlib>=3.6.0',  # PySide6 호환성을 위해 3.6.0 이상 필요
         'numpy',
     ],
     zip_safe=True,

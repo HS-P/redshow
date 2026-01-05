@@ -1,2 +1,3 @@
 [console_scripts]
 redshow_control_node = redshow_control.redshow_control_node:main
+
