@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'redshow_control_node = redshow_control.redshow_control_node:main',
+            'bno085_test_node = redshow_control.bno085_test_node:main',
         ],
     },
 )
