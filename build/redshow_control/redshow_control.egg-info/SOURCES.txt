@@ -1,6 +1,7 @@
 package.xml
 setup.cfg
 setup.py
+launch/control.launch.py
 redshow_control/__init__.py
 redshow_control/bno085_test_node.py
 redshow_control/redshow_control_node.py

@@ -889,16 +889,23 @@ class MonitorGUI(QMainWindow):
     # =========================
     def open_file_dialog(self):
         """Policy 파일 열기 다이얼로그"""
-        # 기본 경로를 control node의 모델 디렉토리로 설정
-        default_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-            'redshow_control', 'redshow_control'
-        )
+        # 기본 경로를 asset_vanilla로 설정
+        # __file__은 gui_node.py의 경로이므로, src 디렉토리로 올라가서 asset_vanilla 찾기
+        src_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        asset_vanilla_path = os.path.join(src_dir, 'asset_vanilla')
+        
+        # asset_vanilla가 없으면 상위 디렉토리에서 찾기
+        if not os.path.exists(asset_vanilla_path):
+            # workspace root에서 찾기
+            workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+            asset_vanilla_path = os.path.join(workspace_root, 'src', 'asset_vanilla')
+        
+        default_path = asset_vanilla_path if os.path.exists(asset_vanilla_path) else ""
         
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Policy 파일 선택",
-            default_path if os.path.exists(default_path) else "",
+            default_path,
             "PyTorch Files (*.pt);;ONNX Files (*.onnx);;All Files (*)"
         )
         
@@ -916,9 +923,9 @@ class MonitorGUI(QMainWindow):
             self.ros2_node.publish_model_path(file_path)
             self.get_logger().info(f"Model path published to control node: {file_path}")
             
-            # PT 파일 구조 확인 (로컬에서도 확인 가능하도록)
+            # 모델 파일 구조 확인 (로컬에서도 확인 가능하도록)
             # 이 함수 내부에서 A-RMA 모델 여부도 확인함
-            self.check_pt_file_structure(file_path)
+            self.check_model_file_structure(file_path)
         else:
             # 파일 선택 취소 시
             self.current_file_path = None
@@ -1054,8 +1061,10 @@ class MonitorGUI(QMainWindow):
                 return
             
             if not self.is_arma_model:
-                # 바닐라 모델: 23개 데이터가 모두 ready 상태여야 함
-                required_indices = list(range(23))  # 0-22
+                # 바닐라 모델: num_actor_obs 개 데이터가 모두 ready 상태여야 함
+                # base_lin_vel이 제거되었을 수 있으므로 실제 계산된 num_actor_obs 사용
+                required_count = self.num_actor_obs if hasattr(self, 'num_actor_obs') and self.num_actor_obs > 0 else 23
+                required_indices = list(range(required_count))  # 0 ~ (required_count-1)
                 missing_indices = []
                 for idx in required_indices:
                     if idx not in self.obs_index_status or not self.obs_index_status[idx].get('ready', False):
@@ -1064,14 +1073,20 @@ class MonitorGUI(QMainWindow):
                 if missing_indices:
                     self.show_warning(
                         f"경고: 필수 Observation 데이터가 부족합니다.\n"
-                        f"부족한 인덱스: {missing_indices[:10]}{'...' if len(missing_indices) > 10 else ''}\n"
+                        f"기대: {required_count}개, 부족한 인덱스: {missing_indices[:10]}{'...' if len(missing_indices) > 10 else ''}\n"
                         f"Control Node가 실행 중이고 데이터를 발행하는지 확인해주세요."
                     )
                     return
             else:
-                # A-RMA 모델: 기본 23개 + extrinsics_obs 8개가 모두 ready 상태여야 함
-                # 기본 23개 확인 (0-22)
-                basic_indices = list(range(23))
+                # A-RMA 모델: 기본 num_actor_obs 개 + extrinsics_obs 8개가 모두 ready 상태여야 함
+                # base_lin_vel이 제거되었을 수 있으므로 실제 계산된 num_actor_obs 사용
+                basic_count = self.num_actor_obs if hasattr(self, 'num_actor_obs') and self.num_actor_obs > 0 else 23
+                # extrinsics_obs를 제외한 기본 observation 개수 (extrinsics_obs는 별도 토픽으로 옴)
+                if 'extrinsics_obs' in self.obs_groups:
+                    extrinsics_dim = len(self.obs_groups['extrinsics_obs']['indices'])
+                    basic_count = basic_count - extrinsics_dim
+                
+                basic_indices = list(range(basic_count))
                 missing_basic = []
                 for idx in basic_indices:
                     if idx not in self.obs_index_status or not self.obs_index_status[idx].get('ready', False):
@@ -1114,6 +1129,13 @@ class MonitorGUI(QMainWindow):
                 self.manual_timer.stop()
                 zero_actions = [0.0] * 6
                 self.ros2_node.publish_joint_cmd(zero_actions)
+        elif self.current_mode == "AUTO":
+            # Auto 모드에서 RUN 시작 시 velocity_command 전송
+            if self.is_running:
+                if hasattr(self, 'auto_velocity_command_inputs'):
+                    vcmd_vals = [s.value() for s in self.auto_velocity_command_inputs]
+                    self.velocity_commands = vcmd_vals.copy()
+                    self.ros2_node.publish_velocity_command(vcmd_vals)
         
         if not self.is_running:
             zero_actions = [0.0] * 6
@@ -1271,27 +1293,47 @@ class MonitorGUI(QMainWindow):
                 ax.autoscale_view()
                 self.obs_canvases[group_name].draw()
 
-    def check_pt_file_structure(self, pt_path: str):
-        """PT 파일 구조 확인 및 env.yaml, agent.yaml에서 Observation 정보 추출"""
-        if not pt_path.endswith('.pt'):
-            return
-        
+    def check_model_file_structure(self, model_path: str):
+        """모델 파일 구조 확인 및 env.yaml, agent.yaml에서 Observation 정보 추출
+        .pt와 .onnx 파일 모두 지원
+        """
         try:
-            pt_dir = os.path.dirname(pt_path)
+            model_dir = os.path.dirname(model_path)
+            input_dim = None
             
-            # 1. PT 파일에서 actor.0.weight shape 확인하여 input_dim 추출
-            ckpt = torch.load(pt_path, map_location="cpu")
-            actor_weight = ckpt.get("actor.0.weight", None)
-            if actor_weight is not None:
-                input_dim = actor_weight.shape[1]  # (hidden_dim, input_dim)
-                self.get_logger().info(f"[GUI CHECKPOINT] Actor input dimension: {input_dim}")
+            # 1. 파일 확장자에 따라 input_dim 추출
+            if model_path.endswith('.pt'):
+                # PT 파일에서 actor.0.weight shape 확인하여 input_dim 추출
+                ckpt = torch.load(model_path, map_location="cpu")
+                actor_weight = ckpt.get("actor.0.weight", None)
+                if actor_weight is not None:
+                    input_dim = actor_weight.shape[1]  # (hidden_dim, input_dim)
+                    self.get_logger().info(f"[GUI CHECKPOINT] Actor input dimension: {input_dim}")
+                else:
+                    self.get_logger().warn("[GUI CHECKPOINT] Could not find actor.0.weight in checkpoint")
+                
+                # PT 파일 구조 확인 (디버깅용)
+                all_keys = list(ckpt.keys())
+                self.get_logger().info(f"[GUI CHECKPOINT] Checkpoint keys ({len(all_keys)}): {all_keys[:10]}...")
+            elif model_path.endswith('.onnx'):
+                # ONNX 파일의 경우 input_dim을 직접 추출하기 어려우므로
+                # env.yaml에서 observation 차원을 합산하여 계산
+                self.get_logger().info(f"[GUI CHECKPOINT] ONNX file detected, will infer input_dim from env.yaml")
             else:
-                self.get_logger().warn("[GUI CHECKPOINT] Could not find actor.0.weight in checkpoint")
-                input_dim = None
+                self.get_logger().warn(f"[GUI CHECKPOINT] Unsupported file format: {model_path}")
+                return
             
             # 2. 같은 폴더에서 env.yaml, agent.yaml 찾기
-            env_yaml_path = os.path.join(pt_dir, "env.yaml")
-            agent_yaml_path = os.path.join(pt_dir, "agent.yaml")
+            # 먼저 모델 파일과 같은 디렉토리에서 찾기
+            env_yaml_path = os.path.join(model_dir, "env.yaml")
+            agent_yaml_path = os.path.join(model_dir, "agent.yaml")
+            
+            # 같은 디렉토리에 없으면 /mnt/data/env.yaml도 확인
+            if not os.path.exists(env_yaml_path):
+                alt_env_yaml_path = "/mnt/data/env.yaml"
+                if os.path.exists(alt_env_yaml_path):
+                    env_yaml_path = alt_env_yaml_path
+                    self.get_logger().info(f"[GUI CHECKPOINT] Using env.yaml from /mnt/data: {alt_env_yaml_path}")
             
             obs_config = None
             
@@ -1326,7 +1368,7 @@ class MonitorGUI(QMainWindow):
                 except Exception as e:
                     self.get_logger().error(f"[GUI CHECKPOINT] Failed to parse env.yaml: {e}")
             else:
-                self.get_logger().warn(f"[GUI CHECKPOINT] env.yaml not found in {pt_dir}")
+                self.get_logger().warn(f"[GUI CHECKPOINT] env.yaml not found in {model_dir} or /mnt/data")
             
             # agent.yaml 읽기 (추가 정보가 있을 수 있음)
             if os.path.exists(agent_yaml_path):
@@ -1338,12 +1380,8 @@ class MonitorGUI(QMainWindow):
                 except Exception as e:
                     self.get_logger().warn(f"[GUI CHECKPOINT] Failed to parse agent.yaml: {e}")
             
-            # PT 파일 구조 확인 (디버깅용)
-            all_keys = list(ckpt.keys())
-            self.get_logger().info(f"[GUI CHECKPOINT] Checkpoint keys ({len(all_keys)}): {all_keys[:10]}...")
-            
         except Exception as e:
-            self.get_logger().error(f"[GUI CHECKPOINT] Failed to inspect PT file: {e}")
+            self.get_logger().error(f"[GUI CHECKPOINT] Failed to inspect model file: {e}")
     
     
     def extract_policy_observations(self, yaml_path: str):

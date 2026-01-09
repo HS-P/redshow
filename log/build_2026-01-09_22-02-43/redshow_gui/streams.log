@@ -1,0 +1,17 @@
+[0.821s] Invoking command in '/home/sol/redshow/build/redshow_gui': PYTHONPATH=/home/sol/redshow/build/redshow_gui/prefix_override:/home/sol/.local/lib/python3.10/site-packages/colcon_core/task/python/colcon_distutils_commands:/home/sol/redshow/install/redshow_gui/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/sol/redshow/build/redshow_gui/build --no-deps symlink_data
+[1.029s] running develop
+[1.138s] running egg_info
+[1.139s] writing redshow_gui.egg-info/PKG-INFO
+[1.139s] writing dependency_links to redshow_gui.egg-info/dependency_links.txt
+[1.140s] writing entry points to redshow_gui.egg-info/entry_points.txt
+[1.140s] writing requirements to redshow_gui.egg-info/requires.txt
+[1.140s] writing top-level names to redshow_gui.egg-info/top_level.txt
+[1.141s] reading manifest file 'redshow_gui.egg-info/SOURCES.txt'
+[1.141s] writing manifest file 'redshow_gui.egg-info/SOURCES.txt'
+[1.142s] running build_ext
+[1.142s] Creating /home/sol/redshow/install/redshow_gui/lib/python3.10/site-packages/redshow-gui.egg-link (link to .)
+[1.142s] Installing redshow_gui script to /home/sol/redshow/install/redshow_gui/lib/redshow_gui
+[1.143s] 
+[1.143s] Installed /home/sol/redshow/build/redshow_gui
+[1.143s] running symlink_data
+[1.167s] Invoked command in '/home/sol/redshow/build/redshow_gui' returned '0': PYTHONPATH=/home/sol/redshow/build/redshow_gui/prefix_override:/home/sol/.local/lib/python3.10/site-packages/colcon_core/task/python/colcon_distutils_commands:/home/sol/redshow/install/redshow_gui/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/sol/redshow/build/redshow_gui/build --no-deps symlink_data

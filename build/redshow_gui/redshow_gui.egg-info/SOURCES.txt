@@ -1,6 +1,7 @@
 package.xml
 setup.cfg
 setup.py
+launch/gui.launch.py
 redshow_gui/__init__.py
 redshow_gui/gui_node.py
 redshow_gui.egg-info/PKG-INFO

@@ -1,0 +1,23 @@
+[0.550s] Invoking command in '/home/sol/redshow/build/redshow_control': PYTHONPATH=/home/sol/redshow/build/redshow_control/prefix_override:/home/sol/.local/lib/python3.10/site-packages/colcon_core/task/python/colcon_distutils_commands:/home/sol/redshow/install/redshow_control/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/sol/redshow/build/redshow_control/build --no-deps symlink_data
+[0.738s] running develop
+[0.836s] running egg_info
+[0.836s] writing redshow_control.egg-info/PKG-INFO
+[0.837s] writing dependency_links to redshow_control.egg-info/dependency_links.txt
+[0.837s] writing entry points to redshow_control.egg-info/entry_points.txt
+[0.837s] writing requirements to redshow_control.egg-info/requires.txt
+[0.837s] writing top-level names to redshow_control.egg-info/top_level.txt
+[0.838s] reading manifest file 'redshow_control.egg-info/SOURCES.txt'
+[0.838s] writing manifest file 'redshow_control.egg-info/SOURCES.txt'
+[0.839s] running build_ext
+[0.839s] Creating /home/sol/redshow/install/redshow_control/lib/python3.10/site-packages/redshow-control.egg-link (link to .)
+[0.840s] Installing bno085_node script to /home/sol/redshow/install/redshow_control/lib/redshow_control
+[0.840s] Installing bno085_test_node script to /home/sol/redshow/install/redshow_control/lib/redshow_control
+[0.840s] Installing redshow_control_node script to /home/sol/redshow/install/redshow_control/lib/redshow_control
+[0.840s] Installing test_adaptation_module_publisher script to /home/sol/redshow/install/redshow_control/lib/redshow_control
+[0.840s] Installing test_feedback_publisher script to /home/sol/redshow/install/redshow_control/lib/redshow_control
+[0.840s] 
+[0.840s] Installed /home/sol/redshow/build/redshow_control
+[0.840s] running symlink_data
+[0.840s] creating /home/sol/redshow/install/redshow_control/share/redshow_control/launch
+[0.841s] symbolically linking /home/sol/redshow/build/redshow_control/launch/control.launch.py -> /home/sol/redshow/install/redshow_control/share/redshow_control/launch
+[0.869s] Invoked command in '/home/sol/redshow/build/redshow_control' returned '0': PYTHONPATH=/home/sol/redshow/build/redshow_control/prefix_override:/home/sol/.local/lib/python3.10/site-packages/colcon_core/task/python/colcon_distutils_commands:/home/sol/redshow/install/redshow_control/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/sol/redshow/build/redshow_control/build --no-deps symlink_data

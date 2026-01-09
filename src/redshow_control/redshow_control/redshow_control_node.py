@@ -24,7 +24,10 @@ class BerkeleyControlNode(Node):
         # ────────────── ROS2 I/O ──────────────
         self.cmd_sub = self.create_subscription(String, 'redshow/cmd', self.cmd_callback, 10)
         self.manual_sub = self.create_subscription(Float64MultiArray, 'redshow/joint_cmd', self.manual_callback, 10)
+        self.velocity_command_sub = self.create_subscription(Float64MultiArray, 'redshow/velocity_command', self.velocity_command_callback, 10)
         self.model_path_sub = self.create_subscription(String, 'redshow/model_path', self.model_path_callback, 10)
+        self.bno085_sub = self.create_subscription(Float64MultiArray, '/Redshow/Sensor', self.bno085_callback, 10)
+        self.get_logger().info("[INIT] Subscribed to /Redshow/Sensor for BNO085 IMU data")
         self.feedback_pub = self.create_publisher(Float64MultiArray, 'redshow/feedback', 10)
         self.policy_hz_pub = self.create_publisher(Float64MultiArray, 'redshow/policy_hz', 10)
         self.shutdown_pub = self.create_publisher(String, 'redshow/shutdown', 10)
@@ -36,10 +39,37 @@ class BerkeleyControlNode(Node):
         self.declare_parameter('policy_name', 'model_4800.pt')
         policy_name = self.get_parameter('policy_name').get_parameter_value().string_value
 
+        # asset_vanilla 경로 찾기 헬퍼 함수
+        def find_asset_vanilla_path():
+            """asset_vanilla 디렉토리 경로 찾기"""
+            # 여러 가능한 경로 확인
+            possible_paths = [
+                # 현재 파일 기준 상대 경로
+                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'asset_vanilla'),
+                # workspace root 기준
+                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), 'src', 'asset_vanilla'),
+                # 절대 경로 (라즈베리파이에서 사용)
+                '/home/pi/ros2_ws/src/redshow/src/asset_vanilla',
+                '/home/sol/redshow/src/asset_vanilla',
+            ]
+            for path in possible_paths:
+                if os.path.exists(path):
+                    return path
+            return None
+        
+        asset_vanilla_path = find_asset_vanilla_path()
+        
+        # 경로 결정: 절대 경로 > 상대 경로 > asset_vanilla > 현재 디렉토리
         if os.path.isabs(policy_name):
             pt_path = policy_name
         elif os.path.exists(policy_name):
             pt_path = policy_name
+        elif asset_vanilla_path:
+            # asset_vanilla에서 찾기
+            pt_path = os.path.join(asset_vanilla_path, policy_name)
+            if not os.path.exists(pt_path):
+                # asset_vanilla에 없으면 현재 디렉토리에서 찾기
+                pt_path = os.path.join(os.path.dirname(__file__), policy_name)
         else:
             pt_path = os.path.join(os.path.dirname(__file__), policy_name)
 
@@ -52,8 +82,12 @@ class BerkeleyControlNode(Node):
             init_noise_std=0.0
         )
 
-        # 초기 모델 로드
-        self.load_policy(pt_path)
+        # 초기 모델 로드 (파일이 없어도 에러 없이 진행, GUI에서 선택할 때 로드)
+        try:
+            self.load_policy(pt_path)
+        except FileNotFoundError:
+            self.get_logger().warn(f"[INIT] Policy file not found: {pt_path}. Will load when GUI selects a file.")
+            pt_path = None
 
         # 현재 모델 경로 저장
         self.current_policy_path = pt_path
@@ -72,6 +106,17 @@ class BerkeleyControlNode(Node):
 
         # Manual input (raw 6D from GUI)
         self.manual_act = torch.zeros(6, device=self.device)
+        
+        # Velocity command (from GUI, Manual/Auto 모두 사용)
+        self.velocity_command = torch.zeros(4, device=self.device)  # [vx, vy, vz, heading]
+        
+        # BNO085 IMU 데이터 (OpenCR IMU 대신 사용)
+        # 데이터 순서: [accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, 
+        #              mag_x, mag_y, mag_z, quat_i, quat_j, quat_k, quat_real]
+        self.bno085_data = None
+        self.bno085_data_lock = threading.Lock()  # 스레드 안전성을 위한 락
+        self.bno085_last_update = None
+        self._bno085_warn_time = time.time()  # 경고 메시지 제어를 위한 초기화
         
         # Auto mode debugging (1초마다 출력)
         self.auto_debug_count = 0
@@ -100,6 +145,8 @@ class BerkeleyControlNode(Node):
         try:
             self.serial = serial.Serial('/dev/ttyACM0', 1_000_000, timeout=0.1)
             self.get_logger().info(f"✓ Serial port opened: /dev/ttyACM0")
+            # 초기화 시 안전을 위해 neutral pose로 설정 (RUN 명령 없이는 움직이지 않음)
+            self.to_neutral()
         except Exception as e:
             self.get_logger().error(f"✗ Failed to open serial port: {e}")
             raise
@@ -180,6 +227,50 @@ class BerkeleyControlNode(Node):
         if self.mode == "MANUAL::RUN":
             self.current_act = self.convert_act(self.manual_act)
 
+    def velocity_command_callback(self, msg: Float64MultiArray):
+        """Velocity command 콜백: Manual/Auto 모드 모두에서 사용"""
+        data = list(msg.data)
+        
+        # 1) length check
+        if len(data) != 4:
+            self.get_logger().warn(f"[VELOCITY_CMD] Invalid length: {len(data)} (expected 4). Ignoring.")
+            return
+        
+        # 2) finite check
+        arr = np.asarray(data, dtype=np.float32)
+        if not np.all(np.isfinite(arr)):
+            self.get_logger().warn(f"[VELOCITY_CMD] NaN/Inf detected: {data}. Ignoring.")
+            return
+        
+        # 3) Store velocity command [vx, vy, vz, heading]
+        self.velocity_command = torch.tensor(arr, dtype=torch.float32, device=self.device)
+        self.get_logger().debug(f"[VELOCITY_CMD] Received: {data}")
+
+    def bno085_callback(self, msg: Float64MultiArray):
+        """BNO085 IMU 데이터 콜백: OpenCR IMU 대신 사용"""
+        data = list(msg.data)
+        
+        # 첫 번째 메시지 수신 시 로그 출력
+        if not hasattr(self, '_bno085_first_received'):
+            self.get_logger().info(f"[BNO085] First data received! Length: {len(data)}")
+            self._bno085_first_received = True
+        
+        # 데이터 길이 확인 (13개: accel(3) + gyro(3) + mag(3) + quat(4))
+        if len(data) != 13:
+            self.get_logger().warn(f"[BNO085] Invalid length: {len(data)} (expected 13). Ignoring.")
+            return
+        
+        # finite check
+        arr = np.asarray(data, dtype=np.float32)
+        if not np.all(np.isfinite(arr)):
+            self.get_logger().warn(f"[BNO085] NaN/Inf detected. Ignoring.")
+            return
+        
+        # 스레드 안전하게 저장
+        with self.bno085_data_lock:
+            self.bno085_data = arr.copy()
+            self.bno085_last_update = time.time()
+
     def model_path_callback(self, msg: String):
         """모델 파일 경로 콜백: 실시간 모델 로딩"""
         model_path = msg.data.strip()
@@ -188,20 +279,59 @@ class BerkeleyControlNode(Node):
             self.get_logger().warn("[MODEL] Empty model path received. Ignoring.")
             return
         
-        # 같은 경로면 무시
-        if model_path == self.current_policy_path:
-            self.get_logger().info(f"[MODEL] Same model path: {model_path}. Skipping reload.")
-            return
+        # asset_vanilla 경로 찾기 헬퍼 함수
+        def find_asset_vanilla_path():
+            """asset_vanilla 디렉토리 경로 찾기"""
+            possible_paths = [
+                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'asset_vanilla'),
+                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), 'src', 'asset_vanilla'),
+                '/home/pi/ros2_ws/src/redshow/src/asset_vanilla',
+                '/home/sol/redshow/src/asset_vanilla',
+            ]
+            for path in possible_paths:
+                if os.path.exists(path):
+                    return path
+            return None
         
-        # 파일 존재 확인
-        if not os.path.exists(model_path):
+        # 경로 해석: 절대 경로 > 상대 경로 > asset_vanilla > 파일명만 주어진 경우
+        resolved_path = None
+        if os.path.isabs(model_path):
+            resolved_path = model_path
+        elif os.path.exists(model_path):
+            resolved_path = os.path.abspath(model_path)
+        else:
+            # asset_vanilla에서 찾기
+            asset_vanilla_path = find_asset_vanilla_path()
+            if asset_vanilla_path:
+                candidate = os.path.join(asset_vanilla_path, model_path)
+                if os.path.exists(candidate):
+                    resolved_path = candidate
+                else:
+                    # 파일명만 주어진 경우
+                    candidate = os.path.join(asset_vanilla_path, os.path.basename(model_path))
+                    if os.path.exists(candidate):
+                        resolved_path = candidate
+        
+        if not resolved_path:
             self.get_logger().error(f"[MODEL] Model file not found: {model_path}")
             return
         
-        # 파일 확장자 확인 (.pt만 지원)
-        if not model_path.endswith('.pt'):
-            self.get_logger().warn(f"[MODEL] Only .pt files are supported. Received: {model_path}")
+        # 같은 경로면 무시
+        if resolved_path == self.current_policy_path:
+            self.get_logger().info(f"[MODEL] Same model path: {resolved_path}. Skipping reload.")
             return
+        
+        # 파일 존재 확인
+        if not os.path.exists(resolved_path):
+            self.get_logger().error(f"[MODEL] Model file not found: {resolved_path}")
+            return
+        
+        # 파일 확장자 확인 (.pt만 지원, .onnx는 나중에 지원 예정)
+        if not resolved_path.endswith('.pt'):
+            self.get_logger().warn(f"[MODEL] Only .pt files are supported. Received: {resolved_path}")
+            return
+        
+        model_path = resolved_path
         
         self.get_logger().info(f"[MODEL] Loading new model: {model_path}")
         
@@ -386,9 +516,11 @@ class BerkeleyControlNode(Node):
                     self.get_logger().warn(f"[POLICY_LOOP] Waiting for sensor data, obs_buffer size: {len(self.obs_buffer)}/4")
                 continue
 
+            # 펌웨어에서 받은 데이터: 위치(4) + 휠 속도(2) = 6개만 사용
+            # IMU 데이터는 BNO085에서 받음
             avg = [sum(s[i] for s in self.obs_buffer) / len(self.obs_buffer) for i in range(16)]
             (U_posL, U_posR, L_posL, L_posR, wL, wR,
-             gx, gy, gz, ax, ay, az, qw, qx, qy, qz) = avg
+             _, _, _, _, _, _, _, _, _, _) = avg  # OpenCR IMU 데이터는 사용하지 않음
 
             leg_pos = torch.tensor([
                 U_posL / self.ENC_PER_RAD - self.PI,
@@ -398,16 +530,36 @@ class BerkeleyControlNode(Node):
             ], dtype=torch.float32, device=self.device)
 
             wheel_vel = torch.tensor([-wL, -wR], dtype=torch.float32, device=self.device)
-            base_ang = torch.tensor([gx, gy, gz], dtype=torch.float32, device=self.device)
-
-            quat = torch.tensor([qw, qx, qy, qz], dtype=torch.float32, device=self.device)
+            
+            # BNO085에서 IMU 데이터 가져오기
+            with self.bno085_data_lock:
+                if self.bno085_data is not None:
+                    # BNO085 데이터: [accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, 
+                    #                mag_x, mag_y, mag_z, quat_i, quat_j, quat_k, quat_real]
+                    bno_data = self.bno085_data
+                    # gyro: 인덱스 3,4,5
+                    base_ang = torch.tensor([bno_data[3], bno_data[4], bno_data[5]], dtype=torch.float32, device=self.device)
+                    # quat: 인덱스 9,10,11,12 (i,j,k,real)
+                    quat = torch.tensor([bno_data[12], bno_data[9], bno_data[10], bno_data[11]], dtype=torch.float32, device=self.device)
+                else:
+                    # BNO085 데이터가 없으면 기본값 사용 (경고는 5초마다만 출력)
+                    if not hasattr(self, '_bno085_warn_time'):
+                        self._bno085_warn_time = time.time()
+                    if current_time - self._bno085_warn_time > 5.0:
+                        self.get_logger().warn("[POLICY_LOOP] BNO085 data not available, using zeros. Make sure bno085_node is running.")
+                        self._bno085_warn_time = current_time
+                    base_ang = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device=self.device)
+                    quat = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32, device=self.device)
+            
+            # Quaternion 정규화
             n = torch.linalg.vector_norm(quat)
             if n.item() > 1e-8:
                 quat = quat / n
             else:
                 quat = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32, device=self.device)
 
-            vcmd = torch.zeros(4, device=self.device)
+            # Velocity command 사용 (GUI에서 받은 값)
+            vcmd = self.velocity_command.clone()
 
             obs = torch.cat([leg_pos, wheel_vel, base_ang, vcmd, quat, self.prev_act]).unsqueeze(0)
 
@@ -527,8 +679,9 @@ class BerkeleyControlNode(Node):
                 )
                 self._last_empty_buffer_log_time = current_time
 
+        # 펌웨어에서 받은 데이터: 위치(4) + 휠 속도(2)만 사용
         (U_posL, U_posR, L_posL, L_posR, wL, wR,
-         gx, gy, gz, ax, ay, az, qw, qx, qy, qz) = avg
+         _, _, _, _, _, _, _, _, _, _) = avg  # OpenCR IMU 데이터는 사용하지 않음
 
         leg_pos = [
             U_posL / self.ENC_PER_RAD - self.PI,
@@ -537,9 +690,24 @@ class BerkeleyControlNode(Node):
             -(L_posR / self.ENC_PER_RAD - self.PI),
         ]
         wheel_vel = [-wL, -wR]
-        base_ang = [gx, gy, gz]
-        vcmd = [0.0, 0.0, 0.0, 0.0]
-        quat = [qw, qx, qy, qz]
+        
+        # BNO085에서 IMU 데이터 가져오기
+        with self.bno085_data_lock:
+            if self.bno085_data is not None:
+                # BNO085 데이터: [accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, 
+                #                mag_x, mag_y, mag_z, quat_i, quat_j, quat_k, quat_real]
+                bno_data = self.bno085_data
+                # gyro: 인덱스 3,4,5
+                base_ang = [bno_data[3], bno_data[4], bno_data[5]]
+                # quat: 인덱스 9,10,11,12 (i,j,k,real) -> (w,x,y,z) 순서로 변환
+                quat = [bno_data[12], bno_data[9], bno_data[10], bno_data[11]]
+            else:
+                # BNO085 데이터가 없으면 기본값 사용
+                base_ang = [0.0, 0.0, 0.0]
+                quat = [1.0, 0.0, 0.0, 0.0]
+        
+        # Velocity command 사용 (GUI에서 받은 값)
+        vcmd = [self.velocity_command[i].item() for i in range(4)]
         prev_act_list = [self.prev_act[i].item() for i in range(6)]
 
         feedback_data = leg_pos + wheel_vel + base_ang + vcmd + quat + prev_act_list

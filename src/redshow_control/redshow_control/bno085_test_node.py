@@ -29,9 +29,9 @@ except ImportError as e:
     sys.exit(1)
 
 
-class BNO085TestNode(Node):
+class BNO085Node(Node):
     def __init__(self):
-        super().__init__('bno085_test_node')
+        super().__init__('bno085_node')
         
         # ROS2 Publisher: 센서 데이터 발행
         self.sensor_pub = self.create_publisher(
@@ -75,14 +75,14 @@ class BNO085TestNode(Node):
             self.status_pub.publish(status_msg)
             raise
         
-        # 타이머 설정 (50Hz로 센서 데이터 읽기)
-        self.timer = self.create_timer(0.02, self.read_sensor_data)
+        # 타이머 설정 (200Hz로 센서 데이터 읽기)
+        self.timer = self.create_timer(0.005, self.read_sensor_data)  # 200Hz = 5ms
         
         # 시각화를 위한 카운터
         self.print_counter = 0
-        self.print_interval = 25  # 25번마다 출력 (약 1초마다, 50Hz 기준)
+        self.print_interval = 200  # 200번마다 출력 (약 1초마다, 200Hz 기준)
         
-        self.get_logger().info("BNO085 테스트 노드 시작됨 (50Hz)")
+        self.get_logger().info("BNO085 노드 시작됨 (200Hz)")
         self.get_logger().info("센서 데이터는 /Redshow/Sensor 토픽으로 발행됩니다")
     
     def read_sensor_data(self):
@@ -167,7 +167,7 @@ def main(args=None):
     rclpy.init(args=args)
     
     try:
-        node = BNO085TestNode()
+        node = BNO085Node()
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass

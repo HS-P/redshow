@@ -1,0 +1,1 @@
+/home/sol/redshow/src/redshow_control/launch/control.launch.py

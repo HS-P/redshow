@@ -1,1 +1,1 @@
-/home/hansol/redshow/src/redshow_control/setup.py
+/home/sol/redshow/src/redshow_control/setup.py
