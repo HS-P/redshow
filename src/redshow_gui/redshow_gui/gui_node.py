@@ -36,26 +36,38 @@ import matplotlib
 # 직접 Qt5Agg를 사용하되 import 에러를 처리
 import sys
 
-# 먼저 matplotlib.use()를 호출
-matplotlib.use('Qt5Agg')
-
-# backend_qtagg의 호환성 문제를 우회하기 위해 
-# 직접 backend_qt5agg를 import 시도
+# PySide6와 호환되는 백엔드 사용
+# matplotlib 3.5.1은 PySide6를 완전히 지원하지 않으므로
+# PyQt5를 설치하거나 matplotlib을 3.6.0 이상으로 업그레이드 필요
+USE_QT_BACKEND = False
 try:
-    # matplotlib 3.5.1에서 PySide6 사용 시 발생하는 문제를 우회
-    from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-except (ImportError, TypeError, AttributeError) as e:
-    # Qt5Agg 실패 시 TkAgg 사용 (비상용)
-    print(f"Warning: Qt5Agg backend failed ({e}), trying TkAgg...")
-    matplotlib.use('TkAgg')
+    # 먼저 QtAgg 시도 (PySide6 지원, matplotlib 3.6.0+ 필요)
+    matplotlib.use('QtAgg')
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+    USE_QT_BACKEND = True
+    print("Using QtAgg backend (PySide6 compatible)")
+except (ImportError, TypeError, AttributeError) as e1:
     try:
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg as FigureCanvas
-        print("Using TkAgg backend as fallback")
-    except ImportError:
-        # 최후의 수단: Agg (non-interactive)
-        matplotlib.use('Agg')
-        from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
-        print("Warning: Using Agg backend (non-interactive plots)")
+        # QtAgg 실패 시 Qt5Agg 시도 (PyQt5 필요)
+        matplotlib.use('Qt5Agg')
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        USE_QT_BACKEND = True
+        print("Using Qt5Agg backend")
+    except (ImportError, TypeError, AttributeError) as e2:
+        # Qt 백엔드 실패 시 TkAgg 사용 (비상용, 그래프 표시 불가)
+        print(f"Warning: Qt backends failed (QtAgg: {e1}, Qt5Agg: {e2})")
+        print("To enable graphs, please:")
+        print("  1. Upgrade matplotlib: pip install --upgrade matplotlib>=3.6.0")
+        print("  2. Or install PyQt5: pip install PyQt5")
+        print("Using TkAgg backend as fallback (graphs will not be displayed)")
+        matplotlib.use('TkAgg')
+        try:
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg as FigureCanvas
+        except ImportError:
+            # 최후의 수단: Agg (non-interactive)
+            matplotlib.use('Agg')
+            from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+            print("Warning: Using Agg backend (non-interactive plots)")
 
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
@@ -76,7 +88,15 @@ class ROS2Node(Node):
         self.joint_pub = self.create_publisher(Float64MultiArray, 'redshow/joint_cmd', 10)
         self.velocity_command_pub = self.create_publisher(Float64MultiArray, 'redshow/velocity_command', 10)
         self.model_path_pub = self.create_publisher(String, 'redshow/model_path', 10)
-        self.feedback_sub = None
+        # 개별 Observation 토픽 구독자
+        self.leg_position_sub = None
+        self.wheel_velocity_sub = None
+        self.base_ang_vel_sub = None
+        self.velocity_commands_sub = None
+        self.base_quat_sub = None
+        self.base_rpy_sub = None
+        self.actions_sub = None
+        
         self.policy_hz_sub = None
         self.shutdown_sub = None
         self.obs_config_sub = None
@@ -106,10 +126,30 @@ class ROS2Node(Node):
         msg.data = model_path
         self.model_path_pub.publish(msg)
     
-    def setup_feedback_subscriber(self, callback):
-        self.feedback_sub = self.create_subscription(
-            Float64MultiArray, 'redshow/feedback', callback, 10
+    def setup_feedback_subscribers(self, callbacks):
+        """개별 Observation 토픽 구독 설정"""
+        self.leg_position_sub = self.create_subscription(
+            Float64MultiArray, '/Redshow/Observation/leg_position', callbacks['leg_position'], 10
         )
+        self.wheel_velocity_sub = self.create_subscription(
+            Float64MultiArray, '/Redshow/Observation/wheel_velocity', callbacks['wheel_velocity'], 10
+        )
+        self.base_ang_vel_sub = self.create_subscription(
+            Float64MultiArray, '/Redshow/Observation/base_ang_vel', callbacks['base_ang_vel'], 10
+        )
+        self.velocity_commands_sub = self.create_subscription(
+            Float64MultiArray, '/Redshow/Observation/velocity_commands', callbacks['velocity_commands'], 10
+        )
+        self.base_quat_sub = self.create_subscription(
+            Float64MultiArray, '/Redshow/Observation/base_quat', callbacks['base_quat'], 10
+        )
+        self.base_rpy_sub = self.create_subscription(
+            Float64MultiArray, '/Redshow/Observation/base_rpy', callbacks['base_rpy'], 10
+        )
+        self.actions_sub = self.create_subscription(
+            Float64MultiArray, '/Redshow/Observation/actions', callbacks['actions'], 10
+        )
+        self.get_logger().info("[ROS2] Subscribed to individual observation topics")
     
     def setup_policy_hz_subscriber(self, callback):
         self.policy_hz_sub = self.create_subscription(
@@ -206,7 +246,18 @@ class MonitorGUI(QMainWindow):
         # ---- ROS2 ----
         rclpy.init()
         self.ros2_node = ROS2Node()
-        self.ros2_node.setup_feedback_subscriber(self.feedback_callback)
+        
+        # 개별 Observation 토픽 콜백 설정
+        observation_callbacks = {
+            'leg_position': lambda msg: self.observation_callback('leg_position', msg),
+            'wheel_velocity': lambda msg: self.observation_callback('wheel_velocity', msg),
+            'base_ang_vel': lambda msg: self.observation_callback('base_ang_vel', msg),
+            'velocity_commands': lambda msg: self.observation_callback('velocity_commands', msg),
+            'base_quat': lambda msg: self.observation_callback('base_quat', msg),
+            'base_rpy': lambda msg: self.observation_callback('base_rpy', msg),
+            'actions': lambda msg: self.observation_callback('actions', msg),
+        }
+        self.ros2_node.setup_feedback_subscribers(observation_callbacks)
         self.ros2_node.setup_policy_hz_subscriber(self.policy_hz_callback)
         self.ros2_node.setup_shutdown_subscriber(self.shutdown_callback)
         self.ros2_node.setup_extrinsics_obs_subscriber(self.extrinsics_obs_callback)
@@ -240,138 +291,61 @@ class MonitorGUI(QMainWindow):
         while rclpy.ok():
             rclpy.spin_once(self.ros2_node, timeout_sec=0.01)
     
-    def feedback_callback(self, msg):
-        """피드백 데이터 콜백"""
-        # num_actor_obs가 설정되어 있으면 그 값 사용, 없으면 기본값 23
-        expected_dim = self.num_actor_obs if hasattr(self, 'num_actor_obs') and self.num_actor_obs > 0 else 23
-        
-        # 받은 데이터 길이와 기대하는 차원 중 작은 값만큼 처리
-        data_len = len(msg.data)
-        max_idx = min(data_len, expected_dim)
-        
-        # 차원 불일치 경고는 한 번만 출력 (정상적인 상황일 수 있음)
-        if data_len != expected_dim:
-            if not hasattr(self, '_dim_mismatch_warned'):
-                self._dim_mismatch_warned = {}
-            
-            mismatch_key = f"{data_len}_{expected_dim}"
-            if mismatch_key not in self._dim_mismatch_warned:
-                if data_len < expected_dim:
-                    self.get_logger().info(
-                        f"[FEEDBACK] Data length ({data_len}) < expected ({expected_dim}). "
-                        f"Missing {expected_dim - data_len} values will be None (this is normal if using test_feedback_publisher)"
-                    )
-                else:
-                    self.get_logger().info(
-                        f"[FEEDBACK] Data length ({data_len}) > expected ({expected_dim}). "
-                        f"Extra {data_len - expected_dim} values will be ignored"
-                    )
-                self._dim_mismatch_warned[mismatch_key] = True
-        
-        # num_actor_obs가 업데이트되면 obs_index_status와 obs_buffer도 확장
-        if expected_dim > len(self.obs_index_status):
-            for idx in range(len(self.obs_index_status), expected_dim):
-                self.obs_index_status[idx] = {'ready': False, 'last_time': None, 'hz': 0.0}
-                self.obs_index_hz_buffers[idx] = deque(maxlen=50)
-                if idx not in self.obs_buffer:
-                    self.obs_buffer[idx] = deque(maxlen=self.max_history)
+    def observation_callback(self, group_name: str, msg: Float64MultiArray):
+        """개별 Observation 토픽 콜백"""
+        if not self.obs_groups or group_name not in self.obs_groups:
+            return
         
         current_time = time.time()
+        group_info = self.obs_groups[group_name]
+        indices = group_info['indices']
+        data = msg.data
         
-        # 각 인덱스별로 데이터 확인 및 상태 업데이트
-        data_array = np.array(msg.data)
+        # 데이터 길이 확인
+        expected_len = len(indices)
+        if len(data) != expected_len:
+            if not hasattr(self, '_obs_length_warned'):
+                self._obs_length_warned = {}
+            if group_name not in self._obs_length_warned:
+                self.get_logger().warn(
+                    f"[GUI] {group_name} data length mismatch: "
+                    f"expected {expected_len}, got {len(data)}"
+                )
+                self._obs_length_warned[group_name] = True
+            return
+        
         any_data_ready = False
         
-        # 받은 데이터를 env.yaml observation 인덱스로 매핑
-        # Control Node가 보내는 데이터는 앞에서부터 순차적으로 채움
-        control_to_env_idx_map = {}  # {control_idx: env_idx}
-        
-        if self.obs_groups:
-            for group_name, group_info in self.obs_groups.items():
-                control_start = group_info.get('control_start_idx')
-                if control_start is not None:
-                    for i, env_idx in enumerate(group_info['indices']):
-                        if control_start + i < data_len:  # 받은 데이터 범위 내에서만 매핑
-                            control_to_env_idx_map[control_start + i] = env_idx
-        
-        # 받은 데이터만큼 처리
-        for control_idx in range(max_idx):
-            # Control Node 인덱스를 env.yaml observation 인덱스로 변환
-            env_idx = control_to_env_idx_map.get(control_idx)
-            if env_idx is None:
-                # 매핑되지 않은 데이터는 건너뜀
-                continue
-            value = msg.data[control_idx]
-            
-            # 데이터 유효성 검사: 모든 데이터는 유효함 (0.0이어도 데이터가 들어온 것이므로)
-            # 단, 너무 오래 지나면 None으로 처리됨
-            is_valid = True
-            
-            if is_valid:
-                # 이전 시간과의 간격으로 Hz 계산
+        # 각 인덱스별로 데이터 처리
+        for i, env_idx in enumerate(indices):
+            if i < len(data):
+                value = data[i]
+                
+                # 인덱스 상태 초기화 (없으면 생성)
+                if env_idx not in self.obs_index_status:
+                    self.obs_index_status[env_idx] = {'ready': False, 'last_time': None, 'hz': 0.0}
+                    self.obs_index_hz_buffers[env_idx] = deque(maxlen=50)
+                    if env_idx not in self.obs_buffer:
+                        self.obs_buffer[env_idx] = deque(maxlen=self.max_history)
+                
+                # Hz 계산
                 if self.obs_index_status[env_idx]['last_time'] is not None:
                     dt = current_time - self.obs_index_status[env_idx]['last_time']
                     if dt > 0 and dt < 1.0:
                         hz = 1.0 / dt
                         if 0 < hz < 1000:
                             self.obs_index_hz_buffers[env_idx].append(hz)
-                            # Hz 평균 계산
                             if len(self.obs_index_hz_buffers[env_idx]) > 0:
                                 self.obs_index_status[env_idx]['hz'] = np.mean(self.obs_index_hz_buffers[env_idx])
                 
+                # 상태 업데이트
                 self.obs_index_status[env_idx]['ready'] = True
                 self.obs_index_status[env_idx]['last_time'] = current_time
                 any_data_ready = True
                 
-                # 피드백 데이터를 obs_buffer에 추가 (env_idx 사용)
+                # 버퍼에 추가
                 if env_idx in self.obs_buffer:
                     self.obs_buffer[env_idx].append(value)
-        
-        # Velocity commands는 GUI에서 설정한 값으로 업데이트
-        if self.obs_groups and 'velocity_commands' in self.obs_groups:
-            vcmd_indices = self.obs_groups['velocity_commands']['indices']
-            for i, env_idx in enumerate(vcmd_indices):
-                if i < len(self.velocity_commands):
-                    if env_idx in self.obs_buffer:
-                        self.obs_buffer[env_idx].append(self.velocity_commands[i])
-                    self.obs_index_status[env_idx]['ready'] = True
-                    self.obs_index_status[env_idx]['last_time'] = current_time
-        
-        # 차원 불일치 경고 (A-RMA 모델인 경우 extrinsics_obs는 별도 토픽으로 오므로 제외)
-        # A-RMA 모델인 경우: 기본 23개 + extrinsics_obs 8개(별도 토픽) = 31개
-        # 따라서 feedback 토픽에서 23개만 받는 것은 정상
-        if expected_dim > 0 and data_len < expected_dim:
-            missing_count = expected_dim - data_len
-            
-            # A-RMA 모델이고 extrinsics_obs가 별도 토픽으로 오는 경우는 경고하지 않음
-            is_arma_with_separate_extrinsics = (
-                self.is_arma_model and 
-                'extrinsics_obs' in self.obs_groups and
-                missing_count == 8  # extrinsics_obs 차원과 일치
-            )
-            
-            if not is_arma_with_separate_extrinsics and self.is_running:
-                # A-RMA가 아닌 경우 또는 다른 차원 불일치인 경우에만 경고
-                self.show_warning(
-                    f"경고: 데이터 차원 불일치!\n"
-                    f"기대: {expected_dim}개, 받음: {data_len}개\n"
-                    f"부족한 데이터: {missing_count}개"
-                )
-                # RUN 중이면 STOP
-                if self.is_running:
-                    self.is_running = False
-                    self.ros2_node.publish_cmd(f"{self.current_mode}::STOP")
-                    self.update_run_button_style()
-    
-        # 받은 데이터보다 많은 인덱스가 있으면 (예: 31개 기대인데 23개만 받음)
-        # 나머지는 None으로 처리
-        for env_idx in range(max_idx, expected_dim):
-            if env_idx not in control_to_env_idx_map.values():  # Control Node에서 오지 않는 데이터
-                if self.obs_index_status[env_idx]['last_time'] is not None:
-                    elapsed = current_time - self.obs_index_status[env_idx]['last_time']
-                    if elapsed > 1.0:  # 1초 이상 데이터가 없으면 None
-                        self.obs_index_status[env_idx]['ready'] = False
-                        self.obs_index_status[env_idx]['hz'] = 0.0
         
         # 전체 상태 업데이트
         if any_data_ready:
@@ -583,7 +557,7 @@ class MonitorGUI(QMainWindow):
         obs_status_layout = QVBoxLayout()
         
         # 토픽명 표시
-        obs_topic_label = QLabel("Topic: redshow/feedback")
+        obs_topic_label = QLabel("Topics: /Redshow/Observation/*")
         obs_topic_label.setStyleSheet("font-size: 9pt; color: #666; padding: 2px;")
         obs_status_layout.addWidget(obs_topic_label)
         
@@ -861,10 +835,15 @@ class MonitorGUI(QMainWindow):
         if not self.obs_groups or not hasattr(self, 'graph_layout'):
             return
         
-        # 모든 그래프 숨기기
+        # 모든 그래프 숨기기 (Qt 위젯인 경우만)
         for group_name in self.obs_groups.keys():
             if group_name in self.obs_canvases:
-                self.obs_canvases[group_name].hide()
+                canvas = self.obs_canvases[group_name]
+                if isinstance(canvas, QWidget):
+                    if hasattr(canvas, 'setVisible'):
+                        canvas.setVisible(False)
+                    elif hasattr(canvas, 'hide'):
+                        canvas.hide()
         
         # 현재 페이지의 그래프만 표시
         group_names = list(self.obs_groups.keys())
@@ -874,7 +853,12 @@ class MonitorGUI(QMainWindow):
         for i in range(start_idx, end_idx):
             group_name = group_names[i]
             if group_name in self.obs_canvases:
-                self.obs_canvases[group_name].show()
+                canvas = self.obs_canvases[group_name]
+                if isinstance(canvas, QWidget):
+                    if hasattr(canvas, 'setVisible'):
+                        canvas.setVisible(True)
+                    elif hasattr(canvas, 'show'):
+                        canvas.show()
         
         # 페이지 정보 업데이트
         total_pages = (len(group_names) + self.graph_items_per_page - 1) // self.graph_items_per_page
@@ -1419,9 +1403,14 @@ class MonitorGUI(QMainWindow):
                 
                 # policy 섹션 내부의 observation 항목들 추출
                 if in_policy:
-                    # policy 섹션이 끝났는지 확인
-                    if stripped and current_indent <= observations_indent:
-                        break
+                    # policy 섹션이 끝났는지 확인 (다른 섹션 시작: student_policy, teacher_policy, critic 등)
+                    if stripped and current_indent <= policy_indent:
+                        # policy와 같은 레벨의 다른 섹션이 시작되면 policy 섹션 종료
+                        if current_indent == policy_indent and ':' in stripped:
+                            break
+                        # observations 레벨로 돌아가면 종료
+                        if current_indent <= observations_indent:
+                            break
                     
                     # observation 항목 이름 추출 (policy_indent보다 한 단계 더 들여쓰기된 것들)
                     if current_indent == policy_indent + 2 and ':' in stripped:
@@ -1431,7 +1420,8 @@ class MonitorGUI(QMainWindow):
                         if key not in ['concatenate_terms', 'enable_corruption', 'history_length', 
                                       'flatten_history_dim', 'func', 'params', 'modifiers', 
                                       'noise', 'clip', 'scale', 'base_lin_vel']:
-                            if key:
+                            # 중복 체크: 이미 추가된 observation은 건너뜀
+                            if key and key not in policy_obs:
                                 policy_obs[key] = {}
                                 current_obs_name = key
                                 self.get_logger().info(f"[GUI CHECKPOINT] Found observation: {key}")
@@ -1774,6 +1764,15 @@ class MonitorGUI(QMainWindow):
                 except Exception as e:
                     self.get_logger().warn(f"[GUI] Error removing placeholder: {e}")
             
+            # Qt 백엔드가 아닌 경우 그래프 생성 건너뛰기
+            if not USE_QT_BACKEND:
+                self.get_logger().warn(
+                    "[GUI] Qt backend not available. Graphs will not be displayed. "
+                    "Please upgrade matplotlib (pip install --upgrade matplotlib>=3.6.0) "
+                    "or install PyQt5 (pip install PyQt5) to enable graphs."
+                )
+                return
+            
             # 각 observation group에 대해 그래프 생성
             for group_name, group_info in self.obs_groups.items():
                 try:
@@ -1801,12 +1800,19 @@ class MonitorGUI(QMainWindow):
                     self.obs_axes[group_name] = ax
                     self.obs_lines[group_name] = lines
                     
-                    # 레이아웃에 추가
-                    layout.addWidget(canvas)
-                    # 초기에는 숨김 (페이지별로 표시)
-                    canvas.hide()
+                    # 레이아웃에 추가 (Qt 위젯인 경우만)
+                    if isinstance(canvas, QWidget):
+                        layout.addWidget(canvas)
+                        # 초기에는 숨김 (페이지별로 표시)
+                        if hasattr(canvas, 'setVisible'):
+                            canvas.setVisible(False)
+                        elif hasattr(canvas, 'hide'):
+                            canvas.hide()
+                    else:
+                        self.get_logger().warn(f"[GUI] Canvas for {group_name} is not a Qt widget, skipping")
+                        continue
                 except Exception as e:
-                    self.get_logger().error(f"[GUI] Error creating graph for {group_name}: {e}", exc_info=False)
+                    self.get_logger().error(f"[GUI] Error creating graph for {group_name}: {e}")
                     continue
             
             layout.addStretch()
@@ -1815,7 +1821,7 @@ class MonitorGUI(QMainWindow):
             self.update_graph_display()
             
         except Exception as e:
-            self.get_logger().error(f"[GUI] Error updating graph widgets: {e}", exc_info=False)
+            self.get_logger().error(f"[GUI] Error updating graph widgets: {e}")
             import traceback
             self.get_logger().error(f"[GUI] Traceback: {traceback.format_exc()}")
     

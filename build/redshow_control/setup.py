@@ -1,1 +1,1 @@
-/home/sol/redshow/src/redshow_control/setup.py
+/home/pi/ros2_ws/src/redshow_control/setup.py

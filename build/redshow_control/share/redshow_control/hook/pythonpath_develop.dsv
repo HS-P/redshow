@@ -1,1 +1,1 @@
-prepend-non-duplicate;PYTHONPATH;/home/sol/redshow/build/redshow_control
+prepend-non-duplicate;PYTHONPATH;/home/pi/ros2_ws/build/redshow_control

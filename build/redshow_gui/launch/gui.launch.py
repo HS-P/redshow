@@ -1,1 +1,1 @@
-/home/sol/redshow/src/redshow_gui/launch/gui.launch.py
+/home/pi/ros2_ws/src/redshow_gui/launch/gui.launch.py

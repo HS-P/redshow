@@ -1,3 +1,2 @@
 [console_scripts]
 redshow_gui = redshow_gui.gui_node:main
-

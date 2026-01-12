@@ -33,10 +33,30 @@ class BNO085Node(Node):
     def __init__(self):
         super().__init__('bno085_node')
         
-        # ROS2 Publisher: 센서 데이터 발행
-        self.sensor_pub = self.create_publisher(
-            Float64MultiArray, 
-            '/Redshow/Sensor', 
+        # ROS2 Publisher: 개별 센서 데이터 발행
+        self.accelerometer_pub = self.create_publisher(
+            Float64MultiArray,
+            '/Redshow/Sensor/accelerometer',
+            10
+        )
+        self.gyroscope_pub = self.create_publisher(
+            Float64MultiArray,
+            '/Redshow/Sensor/gyroscope',
+            10
+        )
+        self.magnetometer_pub = self.create_publisher(
+            Float64MultiArray,
+            '/Redshow/Sensor/magnetometer',
+            10
+        )
+        self.quaternion_pub = self.create_publisher(
+            Float64MultiArray,
+            '/Redshow/Sensor/quaternion',
+            10
+        )
+        self.rpy_pub = self.create_publisher(
+            Float64MultiArray,
+            '/Redshow/Sensor/rpy',
             10
         )
         
@@ -83,7 +103,30 @@ class BNO085Node(Node):
         self.print_interval = 200  # 200번마다 출력 (약 1초마다, 200Hz 기준)
         
         self.get_logger().info("BNO085 노드 시작됨 (200Hz)")
-        self.get_logger().info("센서 데이터는 /Redshow/Sensor 토픽으로 발행됩니다")
+        self.get_logger().info("개별 센서 데이터는 /Redshow/Sensor/* 토픽으로 발행됩니다")
+    
+    def quaternion_to_rpy(self, quat_i, quat_j, quat_k, quat_real):
+        """
+        Quaternion (i, j, k, real)을 Roll, Pitch, Yaw (RPY)로 변환
+        """
+        # Roll (x-axis rotation)
+        sinr_cosp = 2 * (quat_real * quat_i + quat_j * quat_k)
+        cosr_cosp = 1 - 2 * (quat_i * quat_i + quat_j * quat_j)
+        roll = math.atan2(sinr_cosp, cosr_cosp)
+        
+        # Pitch (y-axis rotation)
+        sinp = 2 * (quat_real * quat_j - quat_k * quat_i)
+        if abs(sinp) >= 1:
+            pitch = math.copysign(math.pi / 2, sinp)
+        else:
+            pitch = math.asin(sinp)
+        
+        # Yaw (z-axis rotation)
+        siny_cosp = 2 * (quat_real * quat_k + quat_i * quat_j)
+        cosy_cosp = 1 - 2 * (quat_j * quat_j + quat_k * quat_k)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+        
+        return [roll, pitch, yaw]
     
     def read_sensor_data(self):
         """센서 데이터를 읽고 ROS2 토픽으로 발행"""
@@ -94,30 +137,45 @@ class BNO085Node(Node):
             mag_x, mag_y, mag_z = self.bno.magnetic
             quat_i, quat_j, quat_k, quat_real = self.bno.quaternion
             
-            # ROS2 메시지 생성
-            # 데이터 순서: [accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, 
-            #              mag_x, mag_y, mag_z, quat_i, quat_j, quat_k, quat_real]
-            msg = Float64MultiArray()
-            msg.data = [
-                accel_x, accel_y, accel_z,      # 가속도 (m/s^2)
-                gyro_x, gyro_y, gyro_z,         # 자이로 (rad/s)
-                mag_x, mag_y, mag_z,            # 자기계 (uT)
-                quat_i, quat_j, quat_k, quat_real  # 쿼터니언
-            ]
+            # Quaternion을 RPY로 변환
+            rpy = self.quaternion_to_rpy(quat_i, quat_j, quat_k, quat_real)
             
-            # 토픽 발행
-            self.sensor_pub.publish(msg)
+            # 개별 센서 데이터 토픽 발행
+            # Accelerometer
+            msg_accel = Float64MultiArray()
+            msg_accel.data = [accel_x, accel_y, accel_z]
+            self.accelerometer_pub.publish(msg_accel)
             
-            # 시각화 출력 (1초마다)
-            self.print_counter += 1
-            if self.print_counter >= self.print_interval:
-                self.print_counter = 0
-                self.print_sensor_data(
-                    accel_x, accel_y, accel_z,
-                    gyro_x, gyro_y, gyro_z,
-                    mag_x, mag_y, mag_z,
-                    quat_i, quat_j, quat_k, quat_real
-                )
+            # Gyroscope
+            msg_gyro = Float64MultiArray()
+            msg_gyro.data = [gyro_x, gyro_y, gyro_z]
+            self.gyroscope_pub.publish(msg_gyro)
+            
+            # Magnetometer
+            msg_mag = Float64MultiArray()
+            msg_mag.data = [mag_x, mag_y, mag_z]
+            self.magnetometer_pub.publish(msg_mag)
+            
+            # Quaternion
+            msg_quat = Float64MultiArray()
+            msg_quat.data = [quat_i, quat_j, quat_k, quat_real]
+            self.quaternion_pub.publish(msg_quat)
+            
+            # RPY
+            msg_rpy = Float64MultiArray()
+            msg_rpy.data = rpy
+            self.rpy_pub.publish(msg_rpy)
+            
+            # 시각화 출력 제거 (GUI에서 확인 가능)
+            # self.print_counter += 1
+            # if self.print_counter >= self.print_interval:
+            #     self.print_counter = 0
+            #     self.print_sensor_data(
+            #         accel_x, accel_y, accel_z,
+            #         gyro_x, gyro_y, gyro_z,
+            #         mag_x, mag_y, mag_z,
+            #         quat_i, quat_j, quat_k, quat_real
+            #     )
                 
         except Exception as e:
             self.get_logger().error(f"센서 데이터 읽기 오류: {e}", exc_info=True)
