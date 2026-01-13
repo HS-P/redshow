@@ -1,0 +1,17 @@
+[2.375s] Invoking command in '/home/pi/ros2_ws/build/redshow_record': PYTHONPATH=/home/pi/ros2_ws/build/redshow_record/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/pi/ros2_ws/install/redshow_record/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/pi/ros2_ws/build/redshow_record/build --no-deps symlink_data
+[2.960s] running develop
+[3.253s] running egg_info
+[3.282s] writing redshow_record.egg-info/PKG-INFO
+[3.284s] writing dependency_links to redshow_record.egg-info/dependency_links.txt
+[3.285s] writing entry points to redshow_record.egg-info/entry_points.txt
+[3.286s] writing requirements to redshow_record.egg-info/requires.txt
+[3.286s] writing top-level names to redshow_record.egg-info/top_level.txt
+[3.345s] reading manifest file 'redshow_record.egg-info/SOURCES.txt'
+[3.345s] writing manifest file 'redshow_record.egg-info/SOURCES.txt'
+[3.377s] running build_ext
+[3.378s] Creating /home/pi/ros2_ws/install/redshow_record/lib/python3.12/site-packages/redshow-record.egg-link (link to .)
+[3.378s] Installing record_node script to /home/pi/ros2_ws/install/redshow_record/lib/redshow_record
+[3.379s] 
+[3.380s] Installed /home/pi/ros2_ws/build/redshow_record
+[3.381s] running symlink_data
+[3.647s] Invoked command in '/home/pi/ros2_ws/build/redshow_record' returned '0': PYTHONPATH=/home/pi/ros2_ws/build/redshow_record/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/pi/ros2_ws/install/redshow_record/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/pi/ros2_ws/build/redshow_record/build --no-deps symlink_data

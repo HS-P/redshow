@@ -200,6 +200,7 @@ class MonitorGUI(QMainWindow):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.current_mode = None  # "MANUAL" or "AUTO"
         self.is_running = False
+        self.is_recording = False  # RECORD 상태 초기화
         self.selected_mode_btn = None
         self.current_file_path = None
         
@@ -648,20 +649,27 @@ class MonitorGUI(QMainWindow):
         self.manual_mode_btn = QPushButton("Manual")
         self.auto_mode_btn = QPushButton("Auto")
         self.run_btn = QPushButton("RUN")
+        self.record_btn = QPushButton("RECORD")
         
         self.manual_mode_btn.setMinimumHeight(50)
         self.auto_mode_btn.setMinimumHeight(50)
         self.run_btn.setMinimumHeight(50)
+        self.record_btn.setMinimumHeight(50)
         
         self.manual_mode_btn.clicked.connect(self.on_manual_mode)
         self.auto_mode_btn.clicked.connect(self.on_auto_mode)
         self.run_btn.clicked.connect(self.on_run)
+        self.record_btn.clicked.connect(self.on_record)
         
         control_btn_layout.addWidget(self.manual_mode_btn)
         control_btn_layout.addWidget(self.auto_mode_btn)
         control_btn_layout.addWidget(self.run_btn)
+        control_btn_layout.addWidget(self.record_btn)
         
         control_btn_group.setLayout(control_btn_layout)
+        
+        # RECORD 버튼 초기 스타일 설정
+        self.update_record_button_style()
         l.addWidget(control_btn_group)
         
         return w
@@ -1126,6 +1134,26 @@ class MonitorGUI(QMainWindow):
             self.ros2_node.publish_joint_cmd(zero_actions)
         
         self.update_run_button_style()
+    
+    def on_record(self):
+        """RECORD 버튼 클릭 핸들러"""
+        self.is_recording = not self.is_recording
+        cmd = "RECORD" if self.is_recording else "STOP_RECORD"
+        self.ros2_node.publish_cmd(cmd)
+        self.update_record_button_style()
+    
+    def update_record_button_style(self):
+        """RECORD 버튼 스타일 업데이트"""
+        if self.is_recording:
+            self.record_btn.setText("STOP RECORD")
+            self.record_btn.setStyleSheet(
+                "background-color: #FF6B6B; color: white; font-weight: bold; font-size: 12pt;"
+            )
+        else:
+            self.record_btn.setText("RECORD")
+            self.record_btn.setStyleSheet(
+                "background-color: #4A90E2; color: white; font-weight: bold; font-size: 12pt;"
+            )
     
     def update_run_button_style(self):
         """RUN 버튼 스타일 업데이트"""

@@ -33,6 +33,9 @@ class BNO085Node(Node):
     def __init__(self):
         super().__init__('bno085_node')
         
+        # YAW unwrapping을 위한 이전 yaw 값 저장
+        self.prev_yaw = None
+        
         # ROS2 Publisher: 개별 센서 데이터 발행
         self.accelerometer_pub = self.create_publisher(
             Float64MultiArray,
@@ -108,6 +111,7 @@ class BNO085Node(Node):
     def quaternion_to_rpy(self, quat_i, quat_j, quat_k, quat_real):
         """
         Quaternion (i, j, k, real)을 Roll, Pitch, Yaw (RPY)로 변환
+        YAW 각도 wrapping 문제 해결 (unwrapping 적용)
         """
         # Roll (x-axis rotation)
         sinr_cosp = 2 * (quat_real * quat_i + quat_j * quat_k)
@@ -125,6 +129,18 @@ class BNO085Node(Node):
         siny_cosp = 2 * (quat_real * quat_k + quat_i * quat_j)
         cosy_cosp = 1 - 2 * (quat_j * quat_j + quat_k * quat_k)
         yaw = math.atan2(siny_cosp, cosy_cosp)
+        
+        # YAW unwrapping: 이전 값과의 차이가 π를 넘어가면 2π 보정
+        if self.prev_yaw is not None:
+            yaw_diff = yaw - self.prev_yaw
+            # 차이가 π보다 크면 -2π, -π보다 작으면 +2π
+            if yaw_diff > math.pi:
+                yaw = yaw - 2 * math.pi
+            elif yaw_diff < -math.pi:
+                yaw = yaw + 2 * math.pi
+        
+        # 이전 yaw 값 업데이트
+        self.prev_yaw = yaw
         
         return [roll, pitch, yaw]
     

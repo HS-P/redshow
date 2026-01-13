@@ -1,0 +1,2 @@
+[console_scripts]
+record_node = redshow_record.record_node:main

@@ -1,0 +1,24 @@
+[2.368s] Invoking command in '/home/pi/ros2_ws/build/redshow_record': PYTHONPATH=/home/pi/ros2_ws/build/redshow_record/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/pi/ros2_ws/install/redshow_record/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/pi/ros2_ws/build/redshow_record/build --no-deps symlink_data
+[2.939s] running develop
+[3.230s] running egg_info
+[3.230s] creating redshow_record.egg-info
+[3.261s] writing redshow_record.egg-info/PKG-INFO
+[3.262s] writing dependency_links to redshow_record.egg-info/dependency_links.txt
+[3.262s] writing entry points to redshow_record.egg-info/entry_points.txt
+[3.262s] writing requirements to redshow_record.egg-info/requires.txt
+[3.263s] writing top-level names to redshow_record.egg-info/top_level.txt
+[3.263s] writing manifest file 'redshow_record.egg-info/SOURCES.txt'
+[3.321s] reading manifest file 'redshow_record.egg-info/SOURCES.txt'
+[3.322s] writing manifest file 'redshow_record.egg-info/SOURCES.txt'
+[3.368s] running build_ext
+[3.369s] Creating /home/pi/ros2_ws/install/redshow_record/lib/python3.12/site-packages/redshow-record.egg-link (link to .)
+[3.372s] Installing record_node script to /home/pi/ros2_ws/install/redshow_record/lib/redshow_record
+[3.374s] 
+[3.377s] Installed /home/pi/ros2_ws/build/redshow_record
+[3.379s] running symlink_data
+[3.381s] creating /home/pi/ros2_ws/install/redshow_record/share/ament_index
+[3.384s] creating /home/pi/ros2_ws/install/redshow_record/share/ament_index/resource_index
+[3.386s] creating /home/pi/ros2_ws/install/redshow_record/share/ament_index/resource_index/packages
+[3.388s] symbolically linking /home/pi/ros2_ws/build/redshow_record/resource/redshow_record -> /home/pi/ros2_ws/install/redshow_record/share/ament_index/resource_index/packages
+[3.390s] symbolically linking /home/pi/ros2_ws/build/redshow_record/package.xml -> /home/pi/ros2_ws/install/redshow_record/share/redshow_record
+[3.646s] Invoked command in '/home/pi/ros2_ws/build/redshow_record' returned '0': PYTHONPATH=/home/pi/ros2_ws/build/redshow_record/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/pi/ros2_ws/install/redshow_record/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/pi/ros2_ws/build/redshow_record/build --no-deps symlink_data

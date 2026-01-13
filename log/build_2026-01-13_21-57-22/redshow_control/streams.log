@@ -1,0 +1,21 @@
+[2.339s] Invoking command in '/home/pi/ros2_ws/build/redshow_control': PYTHONPATH=/home/pi/ros2_ws/build/redshow_control/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/pi/ros2_ws/install/redshow_control/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/pi/ros2_ws/build/redshow_control/build --no-deps symlink_data
+[2.928s] running develop
+[3.227s] running egg_info
+[3.265s] writing redshow_control.egg-info/PKG-INFO
+[3.265s] writing dependency_links to redshow_control.egg-info/dependency_links.txt
+[3.266s] writing entry points to redshow_control.egg-info/entry_points.txt
+[3.267s] writing requirements to redshow_control.egg-info/requires.txt
+[3.267s] writing top-level names to redshow_control.egg-info/top_level.txt
+[3.326s] reading manifest file 'redshow_control.egg-info/SOURCES.txt'
+[3.327s] writing manifest file 'redshow_control.egg-info/SOURCES.txt'
+[3.369s] running build_ext
+[3.370s] Creating /home/pi/ros2_ws/install/redshow_control/lib/python3.12/site-packages/redshow-control.egg-link (link to .)
+[3.372s] Installing bno085_node script to /home/pi/ros2_ws/install/redshow_control/lib/redshow_control
+[3.373s] Installing bno085_test_node script to /home/pi/ros2_ws/install/redshow_control/lib/redshow_control
+[3.375s] Installing redshow_control_node script to /home/pi/ros2_ws/install/redshow_control/lib/redshow_control
+[3.376s] Installing test_adaptation_module_publisher script to /home/pi/ros2_ws/install/redshow_control/lib/redshow_control
+[3.378s] Installing test_feedback_publisher script to /home/pi/ros2_ws/install/redshow_control/lib/redshow_control
+[3.379s] 
+[3.381s] Installed /home/pi/ros2_ws/build/redshow_control
+[3.383s] running symlink_data
+[3.647s] Invoked command in '/home/pi/ros2_ws/build/redshow_control' returned '0': PYTHONPATH=/home/pi/ros2_ws/build/redshow_control/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/pi/ros2_ws/install/redshow_control/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/pi/ros2_ws/build/redshow_control/build --no-deps symlink_data

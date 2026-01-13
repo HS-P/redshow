@@ -29,5 +29,13 @@ def generate_launch_description():
                 {'policy_name': 'model_4800.pt'},  # 기본 모델 파일명
             ],
         ),
+        
+        # Record 노드 (SYSID 데이터 기록) - 필요시 주석 해제
+        Node(
+            package='redshow_record',
+            executable='record_node',
+            name='record_node',
+            output='screen',
+        ),
     ])
 

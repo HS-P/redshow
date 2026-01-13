@@ -1,0 +1,22 @@
+running develop
+running egg_info
+creating redshow_record.egg-info
+writing redshow_record.egg-info/PKG-INFO
+writing dependency_links to redshow_record.egg-info/dependency_links.txt
+writing entry points to redshow_record.egg-info/entry_points.txt
+writing requirements to redshow_record.egg-info/requires.txt
+writing top-level names to redshow_record.egg-info/top_level.txt
+writing manifest file 'redshow_record.egg-info/SOURCES.txt'
+reading manifest file 'redshow_record.egg-info/SOURCES.txt'
+writing manifest file 'redshow_record.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/pi/ros2_ws/install/redshow_record/lib/python3.12/site-packages/redshow-record.egg-link (link to .)
+Installing record_node script to /home/pi/ros2_ws/install/redshow_record/lib/redshow_record
+
+Installed /home/pi/ros2_ws/build/redshow_record
+running symlink_data
+creating /home/pi/ros2_ws/install/redshow_record/share/ament_index
+creating /home/pi/ros2_ws/install/redshow_record/share/ament_index/resource_index
+creating /home/pi/ros2_ws/install/redshow_record/share/ament_index/resource_index/packages
+symbolically linking /home/pi/ros2_ws/build/redshow_record/resource/redshow_record -> /home/pi/ros2_ws/install/redshow_record/share/ament_index/resource_index/packages
+symbolically linking /home/pi/ros2_ws/build/redshow_record/package.xml -> /home/pi/ros2_ws/install/redshow_record/share/redshow_record

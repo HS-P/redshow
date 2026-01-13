@@ -126,6 +126,12 @@ class BerkeleyControlNode(Node):
 
         self.prev_act = torch.zeros(6, device=self.device)
         self.smoothed_act = torch.zeros(6, device=self.device)
+        
+        # YAW unwrapping을 위한 이전 yaw 값 저장
+        self.prev_yaw = None
+        
+        # Quaternion double cover 문제 해결을 위한 이전 quaternion 저장
+        self.prev_quat = None
 
         # Manual input (raw 6D from GUI)
         self.manual_act = torch.zeros(6, device=self.device)
@@ -693,6 +699,32 @@ class BerkeleyControlNode(Node):
                 quat = quat / n
             else:
                 quat = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32, device=self.device)
+            
+            # Quaternion double cover 문제 해결: 가장 가까운 표현 선택 (짧은 경로)
+            # 이전 quaternion과의 내적을 계산하여 부호 선택
+            if self.prev_quat is not None:
+                # 현재 quaternion과 이전 quaternion의 내적
+                dot_product = torch.dot(quat, self.prev_quat)
+                
+                # 내적이 음수면 (각도 > 90도) 부호 반전하여 가장 가까운 표현 선택
+                # 이렇게 하면 360도 회전 시에도 연속적으로 유지됨
+                if dot_product.item() < 0.0:
+                    quat = -quat
+                    dot_product = -dot_product  # 부호 반전 후 내적도 업데이트
+                
+                # 추가 검증: 각 성분의 변화량이 너무 크면 부호 반전 고려
+                # (이전 값과의 차이가 큰 경우, 반대 부호가 더 가까울 수 있음)
+                diff = torch.abs(quat - self.prev_quat)
+                diff_neg = torch.abs(-quat - self.prev_quat)
+                if torch.sum(diff_neg).item() < torch.sum(diff).item():
+                    quat = -quat
+            else:
+                # 첫 번째 quaternion: w 성분이 양수가 되도록 정규화
+                if quat[0].item() < 0.0:
+                    quat = -quat
+            
+            # 이전 quaternion 업데이트
+            self.prev_quat = quat.clone()
 
             # Velocity command 사용 (GUI에서 받은 값)
             vcmd = self.velocity_command.clone()
@@ -809,6 +841,7 @@ class BerkeleyControlNode(Node):
     def quaternion_to_rpy(self, quat: torch.Tensor) -> torch.Tensor:
         """
         Quaternion (w, x, y, z)을 Roll, Pitch, Yaw (RPY)로 변환
+        YAW 각도 wrapping 문제 해결 (unwrapping 적용)
         """
         w, x, y, z = quat[0], quat[1], quat[2], quat[3]
         
@@ -827,6 +860,18 @@ class BerkeleyControlNode(Node):
         siny_cosp = 2 * (w * z + x * y)
         cosy_cosp = 1 - 2 * (y * y + z * z)
         yaw = torch.atan2(siny_cosp, cosy_cosp)
+        
+        # YAW unwrapping: 이전 값과의 차이가 π를 넘어가면 2π 보정
+        if self.prev_yaw is not None:
+            yaw_diff = yaw.item() - self.prev_yaw
+            # 차이가 π보다 크면 -2π, -π보다 작으면 +2π
+            if yaw_diff > np.pi:
+                yaw = yaw - 2 * np.pi
+            elif yaw_diff < -np.pi:
+                yaw = yaw + 2 * np.pi
+        
+        # 이전 yaw 값 업데이트
+        self.prev_yaw = yaw.item()
         
         return torch.stack([roll, pitch, yaw])
     
@@ -1008,6 +1053,40 @@ class BerkeleyControlNode(Node):
         
         # Quaternion을 RPY로 변환
         quat_tensor = torch.tensor(quat, dtype=torch.float32, device=self.device)
+        
+        # Quaternion 정규화
+        n = torch.linalg.vector_norm(quat_tensor)
+        if n.item() > 1e-8:
+            quat_tensor = quat_tensor / n
+        else:
+            quat_tensor = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32, device=self.device)
+        
+        # Quaternion double cover 문제 해결: 가장 가까운 표현 선택 (짧은 경로)
+        # 이전 quaternion과의 내적을 계산하여 부호 선택
+        if self.prev_quat is not None:
+            # 현재 quaternion과 이전 quaternion의 내적
+            dot_product = torch.dot(quat_tensor, self.prev_quat)
+            
+            # 내적이 음수면 (각도 > 90도) 부호 반전하여 가장 가까운 표현 선택
+            # 이렇게 하면 360도 회전 시에도 연속적으로 유지됨
+            if dot_product.item() < 0.0:
+                quat_tensor = -quat_tensor
+                dot_product = -dot_product
+            
+            # 추가 검증: 각 성분의 변화량이 너무 크면 부호 반전 고려
+            # (이전 값과의 차이가 큰 경우, 반대 부호가 더 가까울 수 있음)
+            diff = torch.abs(quat_tensor - self.prev_quat)
+            diff_neg = torch.abs(-quat_tensor - self.prev_quat)
+            if torch.sum(diff_neg).item() < torch.sum(diff).item():
+                quat_tensor = -quat_tensor
+        else:
+            # 첫 번째 quaternion: w 성분이 양수가 되도록 정규화
+            if quat_tensor[0].item() < 0.0:
+                quat_tensor = -quat_tensor
+        
+        # 이전 quaternion 업데이트 (policy_loop와 동일한 변수 사용)
+        self.prev_quat = quat_tensor.clone()
+        
         rpy_tensor = self.quaternion_to_rpy(quat_tensor)
         rpy_list = [rpy_tensor[i].item() for i in range(3)]
         

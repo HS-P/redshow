@@ -1,0 +1,13 @@
+package.xml
+setup.cfg
+setup.py
+redshow_record/__init__.py
+redshow_record/record_node.py
+redshow_record.egg-info/PKG-INFO
+redshow_record.egg-info/SOURCES.txt
+redshow_record.egg-info/dependency_links.txt
+redshow_record.egg-info/entry_points.txt
+redshow_record.egg-info/requires.txt
+redshow_record.egg-info/top_level.txt
+redshow_record.egg-info/zip-safe
+resource/redshow_record
