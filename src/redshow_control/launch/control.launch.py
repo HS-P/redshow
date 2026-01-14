@@ -10,7 +10,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     return LaunchDescription([
-        # BNO085 IMU 센서 노드
+        # 1. BNO085 IMU 센서 노드
         Node(
             package='redshow_control',
             executable='bno085_node',
@@ -19,7 +19,15 @@ def generate_launch_description():
             parameters=[],
         ),
         
-        # Control 노드 (OpenCR Firmware와 통신)
+        # 2. Adaptation Module 노드 (A-RMA: 70개 observation history 수집 및 EX_OBS 생성)
+        Node(
+            package='redshow_control',
+            executable='adaptation_module_node',
+            name='adaptation_module_node',
+            output='screen',
+        ),
+        
+        # 3. Control 노드 (OpenCR Firmware와 통신, Serial Observation + IMU + EX_OBS 통합)
         Node(
             package='redshow_control',
             executable='redshow_control_node',

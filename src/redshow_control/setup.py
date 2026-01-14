@@ -30,6 +30,7 @@ setup(
             'redshow_control_node = redshow_control.redshow_control_node:main',
             'bno085_node = redshow_control.bno085_test_node:main',
             'bno085_test_node = redshow_control.bno085_test_node:main',  # 하위 호환성 유지
+            'adaptation_module_node = redshow_control.adaptation_module_node:main',
             'test_feedback_publisher = redshow_control.test_feedback_publisher:main',
             'test_adaptation_module_publisher = redshow_control.test_adaptation_module_publisher:main',
         ],

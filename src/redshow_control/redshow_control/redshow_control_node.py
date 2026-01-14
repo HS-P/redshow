@@ -39,6 +39,10 @@ class BerkeleyControlNode(Node):
         self.bno085_quat_sub = self.create_subscription(Float64MultiArray, '/Redshow/Sensor/quaternion', self.bno085_quat_callback, 10)
         self.get_logger().info("[INIT] Subscribed to /Redshow/Sensor/gyroscope and /Redshow/Sensor/quaternion for BNO085 IMU data")
         
+        # EX_OBS 구독 (A-RMA Adaptation Module 출력)
+        self.ex_obs_sub = self.create_subscription(Float64MultiArray, '/Redshow/Observation/ex_obs', self.ex_obs_callback, 10)
+        self.get_logger().info("[INIT] Subscribed to /Redshow/Observation/ex_obs for A-RMA EX_OBS")
+        
         self.policy_hz_pub = self.create_publisher(Float64MultiArray, 'redshow/policy_hz', 10)
         self.shutdown_pub = self.create_publisher(String, 'redshow/shutdown', 10)
         
@@ -145,6 +149,10 @@ class BerkeleyControlNode(Node):
         self.bno085_data_lock = threading.Lock()  # 스레드 안전성을 위한 락
         self.bno085_last_update = None
         self._bno085_warn_time = time.time()  # 경고 메시지 제어를 위한 초기화
+        
+        # EX_OBS 데이터 (A-RMA Adaptation Module 출력)
+        self.ex_obs = None  # [8차원]
+        self.ex_obs_lock = threading.Lock()  # 스레드 안전성을 위한 락
         
         # Auto mode debugging (1초마다 출력)
         self.auto_debug_count = 0
@@ -343,6 +351,30 @@ class BerkeleyControlNode(Node):
         with self.bno085_data_lock:
             self.bno085_quat = arr.copy()
             self.bno085_last_update = time.time()
+    
+    def ex_obs_callback(self, msg: Float64MultiArray):
+        """EX_OBS 데이터 콜백 (A-RMA Adaptation Module 출력)"""
+        data = list(msg.data)
+        
+        # 첫 번째 메시지 수신 시 로그 출력
+        if not hasattr(self, '_ex_obs_first_received'):
+            self.get_logger().info(f"[EX_OBS] First EX_OBS data received! Length: {len(data)}")
+            self._ex_obs_first_received = True
+        
+        # 데이터 길이 확인 (8차원)
+        if len(data) != 8:
+            self.get_logger().warn(f"[EX_OBS] Invalid EX_OBS length: {len(data)} (expected 8). Ignoring.")
+            return
+        
+        # finite check
+        arr = np.asarray(data, dtype=np.float32)
+        if not np.all(np.isfinite(arr)):
+            self.get_logger().warn(f"[EX_OBS] NaN/Inf detected in EX_OBS. Ignoring.")
+            return
+        
+        # 스레드 안전하게 저장
+        with self.ex_obs_lock:
+            self.ex_obs = arr.copy()
 
     def model_path_callback(self, msg: String):
         """모델 파일 경로 콜백: 실시간 모델 로딩"""
@@ -479,6 +511,30 @@ class BerkeleyControlNode(Node):
         ckpt = torch.load(model_path, map_location="cpu")
         state_dict = ckpt.get("model_state_dict", ckpt)
         actor_state = {k: v for k, v in state_dict.items() if k.startswith("actor")}
+        
+        # Observation 차원 확인 (A-RMA 모델인지 확인)
+        # actor.mlp.0.weight의 shape[1]이 observation 차원
+        obs_dim = 23  # 기본값
+        if "actor.mlp.0.weight" in actor_state:
+            obs_dim = actor_state["actor.mlp.0.weight"].shape[1]
+            self.get_logger().info(f"[MODEL] Detected observation dimension: {obs_dim}")
+            if obs_dim == 31:
+                self.get_logger().info("[MODEL] A-RMA model detected (31-dim observation with EX_OBS)")
+            elif obs_dim == 23:
+                self.get_logger().info("[MODEL] Standard model detected (23-dim observation)")
+            else:
+                self.get_logger().warn(f"[MODEL] Unknown observation dimension: {obs_dim}")
+        
+        # Observation 차원이 다르면 policy 재초기화
+        if obs_dim != 23:
+            self.get_logger().info(f"[MODEL] Reinitializing policy with observation dimension: {obs_dim}")
+            self.policy = ActorCritic(
+                num_actor_obs=obs_dim, num_critic_obs=obs_dim, num_actions=6,
+                actor_hidden_dims=[128, 128, 128],
+                critic_hidden_dims=[128, 128, 128],
+                activation="elu",
+                init_noise_std=0.0
+            )
         
         # 기존 policy에 로드
         self.policy.load_state_dict(actor_state, strict=False)
@@ -729,11 +785,30 @@ class BerkeleyControlNode(Node):
             # Velocity command 사용 (GUI에서 받은 값)
             vcmd = self.velocity_command.clone()
 
-            obs = torch.cat([leg_pos, wheel_vel, base_ang, vcmd, quat, self.prev_act]).unsqueeze(0)
+            # Observation 조립: leg_pos(4) + wheel_vel(2) + base_ang(3) + vcmd(4) + quat(4) + prev_act(6) = 23
+            obs_base = torch.cat([leg_pos, wheel_vel, base_ang, vcmd, quat, self.prev_act])
+            
+            # EX_OBS 추가 (A-RMA 모델인 경우)
+            with self.ex_obs_lock:
+                if self.ex_obs is not None:
+                    ex_obs_tensor = torch.tensor(self.ex_obs, dtype=torch.float32, device=self.device)
+                    obs = torch.cat([obs_base, ex_obs_tensor]).unsqueeze(0)  # [1, 31]
+                else:
+                    obs = obs_base.unsqueeze(0)  # [1, 23]
+                    # A-RMA 모델인데 EX_OBS가 없으면 경고 (5초마다)
+                    if not hasattr(self, '_ex_obs_warn_time'):
+                        self._ex_obs_warn_time = time.time()
+                    if current_time - self._ex_obs_warn_time > 5.0:
+                        # Policy의 observation 차원 확인
+                        if hasattr(self.policy, 'actor') and hasattr(self.policy.actor, 'mlp'):
+                            if self.policy.actor.mlp[0].in_features == 31:
+                                self.get_logger().warn("[POLICY] A-RMA model expects 31-dim observation but EX_OBS is not available. Make sure adaptation_module_node is running.")
+                        self._ex_obs_warn_time = current_time
             
             # Observation shape 확인 (첫 번째 실행 시)
             if self.mode == "AUTO::RUN" and not hasattr(self, '_obs_shape_logged'):
-                self.get_logger().info(f"[POLICY] Observation shape: {obs.shape}, values: leg_pos={leg_pos.tolist()}, wheel_vel={wheel_vel.tolist()}, base_ang={base_ang.tolist()}, vcmd={vcmd.tolist()}, quat={quat.tolist()}, prev_act={self.prev_act.tolist()}")
+                ex_obs_info = f", ex_obs={self.ex_obs}" if self.ex_obs is not None else ", ex_obs=None"
+                self.get_logger().info(f"[POLICY] Observation shape: {obs.shape}, values: leg_pos={leg_pos.tolist()}, wheel_vel={wheel_vel.tolist()}, base_ang={base_ang.tolist()}, vcmd={vcmd.tolist()}, quat={quat.tolist()}, prev_act={self.prev_act.tolist()}{ex_obs_info}")
                 self._obs_shape_logged = True
 
             if self.mode == "AUTO::RUN":
@@ -1049,7 +1124,20 @@ class BerkeleyControlNode(Node):
         
         # Velocity command 사용 (GUI에서 받은 값)
         vcmd = [self.velocity_command[i].item() for i in range(4)]
-        prev_act_list = [self.prev_act[i].item() for i in range(6)]
+        
+        # 실제로 전송된 Action을 policy-space로 역변환하여 사용
+        # self.current_act는 firmware-space이므로 policy-space로 변환 필요
+        # convert_act의 역변환: wheel은 부호 반전 후 스케일 제거, leg는 PI 제거
+        is_auto = self.mode == "AUTO::RUN"
+        wheel_scale = 30.0 if is_auto else 1.0
+        policy_act = torch.zeros(6, device=self.device)
+        policy_act[0] = -self.current_act[0] / wheel_scale  # wheel_L 역변환
+        policy_act[1] = -self.current_act[1] / wheel_scale  # wheel_R 역변환
+        policy_act[2] = self.current_act[2] - self.PI      # upper_L 역변환
+        policy_act[3] = -(self.current_act[3] - self.PI)   # upper_R 역변환 (부호 반전)
+        policy_act[4] = self.current_act[4] - self.PI      # lower_L 역변환
+        policy_act[5] = self.current_act[5] - self.PI      # lower_R 역변환
+        prev_act_list = [policy_act[i].item() for i in range(6)]
         
         # Quaternion을 RPY로 변환
         quat_tensor = torch.tensor(quat, dtype=torch.float32, device=self.device)

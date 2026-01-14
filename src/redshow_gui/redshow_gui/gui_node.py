@@ -149,6 +149,9 @@ class ROS2Node(Node):
         self.actions_sub = self.create_subscription(
             Float64MultiArray, '/Redshow/Observation/actions', callbacks['actions'], 10
         )
+        self.ex_obs_sub = self.create_subscription(
+            Float64MultiArray, '/Redshow/Observation/ex_obs', callbacks.get('ex_obs', None), 10
+        )
         self.get_logger().info("[ROS2] Subscribed to individual observation topics")
     
     def setup_policy_hz_subscriber(self, callback):
@@ -257,6 +260,7 @@ class MonitorGUI(QMainWindow):
             'base_quat': lambda msg: self.observation_callback('base_quat', msg),
             'base_rpy': lambda msg: self.observation_callback('base_rpy', msg),
             'actions': lambda msg: self.observation_callback('actions', msg),
+            'ex_obs': lambda msg: self.observation_callback('ex_obs', msg),
         }
         self.ros2_node.setup_feedback_subscribers(observation_callbacks)
         self.ros2_node.setup_policy_hz_subscriber(self.policy_hz_callback)
@@ -294,6 +298,10 @@ class MonitorGUI(QMainWindow):
     
     def observation_callback(self, group_name: str, msg: Float64MultiArray):
         """개별 Observation 토픽 콜백"""
+        # ex_obs를 extrinsics_obs로 매핑 (A-RMA)
+        if group_name == 'ex_obs':
+            group_name = 'extrinsics_obs'
+        
         if not self.obs_groups or group_name not in self.obs_groups:
             return
         
@@ -1489,7 +1497,7 @@ class MonitorGUI(QMainWindow):
         for obs_name, obs_config in policy_obs.items():
             if obs_name == 'base_lin_vel':
                 continue  # base_lin_vel 제거
-            elif obs_name == 'extrinsics_obs':
+            elif obs_name in ('extrinsics_obs', 'get_z_hat'):  # A-RMA: get_z_hat 또는 extrinsics_obs
                 extrinsics_obs_config = (obs_name, obs_config)  # 나중에 처리
             else:
                 filtered_obs[obs_name] = obs_config
