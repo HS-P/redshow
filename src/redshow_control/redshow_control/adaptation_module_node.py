@@ -115,19 +115,20 @@ class AdaptationModuleNode(Node):
             # 모델 가중치 로드
             state_dict = torch.load(model_path, map_location=self.device)
             
-            # Adaptation Module 구조 정의 (A-RMA 구조에 맞게)
-            # Input: 23차원 observation -> embed -> conv layers -> fc layers -> 8차원 output
+            # Adaptation Module 구조 정의 (checkpoint 구조에 맞게)
+            # Input: 23차원 observation -> embed -> conv2d layers -> fc layers -> 8차원 output
             class AdaptationModule(torch.nn.Module):
                 def __init__(self):
                     super().__init__()
                     # Embedding: 23 -> 64
                     self.embed = torch.nn.Linear(23, 64)
-                    # Conv layers (temporal convolution)
-                    self.conv1 = torch.nn.Conv1d(64, 64, kernel_size=3, padding=1)
-                    self.conv2 = torch.nn.Conv1d(64, 64, kernel_size=3, padding=1)
-                    self.conv3 = torch.nn.Conv1d(64, 64, kernel_size=3, padding=1)
+                    # Conv2d layers (temporal convolution using 2D conv)
+                    # weight shape: [out_channels, in_channels, kernel_h, kernel_w]
+                    self.conv1 = torch.nn.Conv2d(64, 64, kernel_size=(1, 8), padding=(0, 3))
+                    self.conv2 = torch.nn.Conv2d(64, 64, kernel_size=(1, 5), padding=(0, 2))
+                    self.conv3 = torch.nn.Conv2d(64, 64, kernel_size=(1, 5), padding=(0, 2))
                     # FC layers
-                    self.fc1 = torch.nn.Linear(64 * 70, 128)  # 70 timesteps
+                    self.fc1 = torch.nn.Linear(64, 128)
                     self.fc2 = torch.nn.Linear(128, 8)  # Output: 8차원
             
                 def forward(self, obs_history):
@@ -135,13 +136,14 @@ class AdaptationModuleNode(Node):
                     batch_size = obs_history.shape[0]
                     # Embedding: [batch, 70, 23] -> [batch, 70, 64]
                     x = self.embed(obs_history)
-                    # Conv1d expects [batch, channels, sequence_length]
-                    x = x.transpose(1, 2)  # [batch, 64, 70]
+                    # Reshape for Conv2d: [batch, 70, 64] -> [batch, 64, 1, 70] (channel first)
+                    x = x.transpose(1, 2).unsqueeze(2)  # [batch, 64, 1, 70]
+                    # Conv2d layers
                     x = torch.relu(self.conv1(x))
                     x = torch.relu(self.conv2(x))
                     x = torch.relu(self.conv3(x))
-                    # Flatten: [batch, 64, 70] -> [batch, 64*70]
-                    x = x.view(batch_size, -1)
+                    # Global average pooling: [batch, 64, 1, ?] -> [batch, 64]
+                    x = x.mean(dim=(2, 3))  # [batch, 64]
                     # FC layers
                     x = torch.relu(self.fc1(x))
                     x = self.fc2(x)  # [batch, 8]
@@ -154,7 +156,9 @@ class AdaptationModuleNode(Node):
             
             self.get_logger().info(f"✓ Adaptation Module loaded from: {model_path}")
         except Exception as e:
-            self.get_logger().error(f"[ADAPTATION] Failed to load model: {e}", exc_info=True)
+            self.get_logger().error(f"[ADAPTATION] Failed to load model: {e}")
+            import traceback
+            self.get_logger().error(f"[ADAPTATION] Traceback: {traceback.format_exc()}")
     
     def leg_position_callback(self, msg):
         with self.obs_lock:
@@ -238,7 +242,9 @@ class AdaptationModuleNode(Node):
                         self.ex_obs_pub.publish(msg)
                         
                     except Exception as e:
-                        self.get_logger().error(f"[ADAPTATION] Processing error: {e}", exc_info=True)
+                        self.get_logger().error(f"[ADAPTATION] Processing error: {e}")
+                        import traceback
+                        self.get_logger().error(f"[ADAPTATION] Traceback: {traceback.format_exc()}")
             
             # Rate control
             elapsed = time.perf_counter() - start_time
@@ -268,4 +274,5 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
+
 

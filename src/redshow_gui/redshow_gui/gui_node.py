@@ -265,7 +265,8 @@ class MonitorGUI(QMainWindow):
         self.ros2_node.setup_feedback_subscribers(observation_callbacks)
         self.ros2_node.setup_policy_hz_subscriber(self.policy_hz_callback)
         self.ros2_node.setup_shutdown_subscriber(self.shutdown_callback)
-        self.ros2_node.setup_extrinsics_obs_subscriber(self.extrinsics_obs_callback)
+        # ex_obs는 observation_callbacks에서 이미 처리되므로 별도 구독 불필요
+        # self.ros2_node.setup_extrinsics_obs_subscriber(self.extrinsics_obs_callback)
         threading.Thread(target=self.ros_spin, daemon=True).start()
 
         # ---- timers ----
@@ -300,6 +301,10 @@ class MonitorGUI(QMainWindow):
         """개별 Observation 토픽 콜백"""
         # ex_obs를 extrinsics_obs로 매핑 (A-RMA)
         if group_name == 'ex_obs':
+            group_name = 'extrinsics_obs'
+        
+        # get_z_hat도 extrinsics_obs로 매핑 (checkpoint에서 get_z_hat으로 정의된 경우)
+        if group_name == 'get_z_hat':
             group_name = 'extrinsics_obs'
         
         if not self.obs_groups or group_name not in self.obs_groups:
@@ -1595,17 +1600,24 @@ class MonitorGUI(QMainWindow):
             # 기본 23개가 먼저 채워지고, 그 다음에 extrinsics_obs 8개가 옴
             control_start_idx = control_data_idx  # 기본 23개 이후부터 시작
             
-            obs_groups[obs_name] = {
+            # get_z_hat이면 extrinsics_obs로도 등록 (호환성)
+            group_name_for_storage = 'extrinsics_obs' if obs_name == 'get_z_hat' else obs_name
+            
+            obs_groups[group_name_for_storage] = {
                 'names': names,
                 'indices': indices,
                 'control_start_idx': control_start_idx
             }
             
+            # get_z_hat이면 extrinsics_obs로도 별칭 추가
+            if obs_name == 'get_z_hat':
+                obs_groups['get_z_hat'] = obs_groups['extrinsics_obs']
+            
             current_idx += dim
             control_data_idx += dim
             
             self.get_logger().info(
-                f"[GUI CHECKPOINT] {obs_name}: dim={dim}, indices={indices[0]}-{indices[-1]}, "
+                f"[GUI CHECKPOINT] {group_name_for_storage}: dim={dim}, indices={indices[0]}-{indices[-1]}, "
                 f"control_data_idx={control_start_idx}-{control_start_idx+dim-1} (마지막에 추가됨)"
             )
         

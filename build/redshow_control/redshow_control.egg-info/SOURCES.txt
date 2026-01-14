@@ -1,8 +1,16 @@
 package.xml
 setup.cfg
 setup.py
+../../build/redshow_control/redshow_control.egg-info/PKG-INFO
+../../build/redshow_control/redshow_control.egg-info/SOURCES.txt
+../../build/redshow_control/redshow_control.egg-info/dependency_links.txt
+../../build/redshow_control/redshow_control.egg-info/entry_points.txt
+../../build/redshow_control/redshow_control.egg-info/requires.txt
+../../build/redshow_control/redshow_control.egg-info/top_level.txt
+../../build/redshow_control/redshow_control.egg-info/zip-safe
 launch/control.launch.py
 redshow_control/__init__.py
+redshow_control/adaptation_module_node.py
 redshow_control/bno085_test_node.py
 redshow_control/redshow_control_node.py
 redshow_control/test_adaptation_module_publisher.py

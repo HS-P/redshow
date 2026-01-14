@@ -1,6 +1,13 @@
 package.xml
 setup.cfg
 setup.py
+../../build/redshow_gui/redshow_gui.egg-info/PKG-INFO
+../../build/redshow_gui/redshow_gui.egg-info/SOURCES.txt
+../../build/redshow_gui/redshow_gui.egg-info/dependency_links.txt
+../../build/redshow_gui/redshow_gui.egg-info/entry_points.txt
+../../build/redshow_gui/redshow_gui.egg-info/requires.txt
+../../build/redshow_gui/redshow_gui.egg-info/top_level.txt
+../../build/redshow_gui/redshow_gui.egg-info/zip-safe
 launch/gui.launch.py
 redshow_gui/__init__.py
 redshow_gui/gui_node.py

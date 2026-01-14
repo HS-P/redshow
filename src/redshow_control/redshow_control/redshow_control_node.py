@@ -105,6 +105,9 @@ class BerkeleyControlNode(Node):
             init_noise_std=0.0
         )
         
+        # 모델의 예상 observation 차원 (기본값 23, 모델 로드 시 업데이트됨)
+        self.expected_obs_dim = 23
+        
         # ONNX 모델 관련 변수
         self.onnx_session = None
         self.is_onnx_model = False
@@ -468,7 +471,9 @@ class BerkeleyControlNode(Node):
             if was_auto_running:
                 self.get_logger().info("[MODEL] Model reloaded. Please press RUN button to resume AUTO mode.")
         except Exception as e:
-            self.get_logger().error(f"[MODEL] Failed to load model: {e}", exc_info=True)
+            import traceback
+            self.get_logger().error(f"[MODEL] Failed to load model: {e}")
+            self.get_logger().error(f"[MODEL] Traceback: {traceback.format_exc()}")
             if was_auto_running:
                 self.get_logger().warn("[MODEL] Previous model remains active. AUTO mode stopped.")
     
@@ -494,8 +499,19 @@ class BerkeleyControlNode(Node):
             input_name = self.onnx_session.get_inputs()[0].name
             output_name = self.onnx_session.get_outputs()[0].name
             
+            # ONNX 모델의 입력 차원 확인
+            input_shape = self.onnx_session.get_inputs()[0].shape
+            if len(input_shape) >= 2:
+                obs_dim = input_shape[1] if input_shape[1] != 'batch' else 23
+                if isinstance(obs_dim, str):
+                    obs_dim = 23  # 동적 차원인 경우 기본값 사용
+                self.expected_obs_dim = int(obs_dim)
+            else:
+                self.expected_obs_dim = 23
+            
             self.get_logger().info(f"[ONNX] Model loaded: {model_path}")
             self.get_logger().info(f"[ONNX] Input: {input_name}, Output: {output_name}")
+            self.get_logger().info(f"[ONNX] Input shape: {input_shape}, Expected obs dim: {self.expected_obs_dim}")
             self.get_logger().info(f"[ONNX] Providers: {self.onnx_session.get_providers()}")
             
             # 액션 초기화
@@ -513,25 +529,75 @@ class BerkeleyControlNode(Node):
         actor_state = {k: v for k, v in state_dict.items() if k.startswith("actor")}
         
         # Observation 차원 확인 (A-RMA 모델인지 확인)
-        # actor.mlp.0.weight의 shape[1]이 observation 차원
+        # actor의 첫 번째 레이어 weight의 shape[1]이 observation 차원
         obs_dim = 23  # 기본값
-        if "actor.mlp.0.weight" in actor_state:
-            obs_dim = actor_state["actor.mlp.0.weight"].shape[1]
-            self.get_logger().info(f"[MODEL] Detected observation dimension: {obs_dim}")
-            if obs_dim == 31:
-                self.get_logger().info("[MODEL] A-RMA model detected (31-dim observation with EX_OBS)")
-            elif obs_dim == 23:
-                self.get_logger().info("[MODEL] Standard model detected (23-dim observation)")
-            else:
-                self.get_logger().warn(f"[MODEL] Unknown observation dimension: {obs_dim}")
         
-        # Observation 차원이 다르면 policy 재초기화
-        if obs_dim != 23:
-            self.get_logger().info(f"[MODEL] Reinitializing policy with observation dimension: {obs_dim}")
+        # 여러 가능한 키 패턴 확인
+        possible_keys = [
+            "actor.mlp.0.weight",  # 일반적인 구조
+            "actor.0.weight",      # Sequential 구조
+            "actor.module.0.weight", # Module로 감싸진 경우
+        ]
+        
+        for key in possible_keys:
+            if key in actor_state:
+                obs_dim = actor_state[key].shape[1]
+                self.get_logger().info(f"[MODEL] Detected observation dimension: {obs_dim} (from {key})")
+                break
+        
+        if obs_dim == 23:
+            # 키를 찾지 못한 경우, 모든 actor 키를 확인
+            for key in actor_state.keys():
+                if "weight" in key and len(actor_state[key].shape) == 2:
+                    # 첫 번째 레이어 찾기 (가장 작은 인덱스)
+                    if "0" in key or "mlp" in key:
+                        obs_dim = actor_state[key].shape[1]
+                        self.get_logger().info(f"[MODEL] Detected observation dimension: {obs_dim} (from {key})")
+                        break
+        
+        # 체크포인트에서 실제 hidden_dims 추출
+        actor_hidden_dims = []
+        critic_hidden_dims = []
+        
+        # actor hidden dims 추출 (0, 2, 4 레이어의 출력 차원)
+        for i in [0, 2, 4]:
+            key = f"actor.{i}.weight"
+            if key in actor_state:
+                actor_hidden_dims.append(actor_state[key].shape[0])
+        
+        # critic hidden dims 추출
+        critic_state = {k: v for k, v in state_dict.items() if k.startswith("critic")}
+        for i in [0, 2, 4]:
+            key = f"critic.{i}.weight"
+            if key in critic_state:
+                critic_hidden_dims.append(critic_state[key].shape[0])
+        
+        # hidden_dims가 비어있으면 기본값 사용
+        if not actor_hidden_dims:
+            actor_hidden_dims = [128, 128, 128]
+        if not critic_hidden_dims:
+            critic_hidden_dims = [128, 128, 128]
+        
+        self.get_logger().info(f"[MODEL] Detected actor hidden dims: {actor_hidden_dims}")
+        self.get_logger().info(f"[MODEL] Detected critic hidden dims: {critic_hidden_dims}")
+        
+        if obs_dim == 31:
+            self.get_logger().info("[MODEL] A-RMA model detected (31-dim observation with EX_OBS)")
+        elif obs_dim == 23:
+            self.get_logger().info("[MODEL] Standard model detected (23-dim observation)")
+        else:
+            self.get_logger().warn(f"[MODEL] Unknown observation dimension: {obs_dim}")
+        
+        # 예상 observation 차원 저장
+        self.expected_obs_dim = obs_dim
+        
+        # Observation 차원이나 hidden_dims가 다르면 policy 재초기화
+        if obs_dim != 23 or actor_hidden_dims != [128, 128, 128]:
+            self.get_logger().info(f"[MODEL] Reinitializing policy with observation dimension: {obs_dim}, hidden_dims: {actor_hidden_dims}")
             self.policy = ActorCritic(
                 num_actor_obs=obs_dim, num_critic_obs=obs_dim, num_actions=6,
-                actor_hidden_dims=[128, 128, 128],
-                critic_hidden_dims=[128, 128, 128],
+                actor_hidden_dims=actor_hidden_dims,
+                critic_hidden_dims=critic_hidden_dims,
                 activation="elu",
                 init_noise_std=0.0
             )
@@ -788,22 +854,28 @@ class BerkeleyControlNode(Node):
             # Observation 조립: leg_pos(4) + wheel_vel(2) + base_ang(3) + vcmd(4) + quat(4) + prev_act(6) = 23
             obs_base = torch.cat([leg_pos, wheel_vel, base_ang, vcmd, quat, self.prev_act])
             
-            # EX_OBS 추가 (A-RMA 모델인 경우)
-            with self.ex_obs_lock:
-                if self.ex_obs is not None:
-                    ex_obs_tensor = torch.tensor(self.ex_obs, dtype=torch.float32, device=self.device)
-                    obs = torch.cat([obs_base, ex_obs_tensor]).unsqueeze(0)  # [1, 31]
-                else:
-                    obs = obs_base.unsqueeze(0)  # [1, 23]
-                    # A-RMA 모델인데 EX_OBS가 없으면 경고 (5초마다)
-                    if not hasattr(self, '_ex_obs_warn_time'):
-                        self._ex_obs_warn_time = time.time()
-                    if current_time - self._ex_obs_warn_time > 5.0:
-                        # Policy의 observation 차원 확인
-                        if hasattr(self.policy, 'actor') and hasattr(self.policy.actor, 'mlp'):
-                            if self.policy.actor.mlp[0].in_features == 31:
-                                self.get_logger().warn("[POLICY] A-RMA model expects 31-dim observation but EX_OBS is not available. Make sure adaptation_module_node is running.")
-                        self._ex_obs_warn_time = current_time
+            # EX_OBS 추가 (모델이 31차원을 기대하는 경우에만)
+            obs = obs_base.unsqueeze(0)  # [1, 23]
+            
+            if self.expected_obs_dim == 31:
+                # A-RMA 모델: EX_OBS 추가 필요
+                with self.ex_obs_lock:
+                    if self.ex_obs is not None:
+                        ex_obs_tensor = torch.tensor(self.ex_obs, dtype=torch.float32, device=self.device)
+                        obs = torch.cat([obs_base, ex_obs_tensor]).unsqueeze(0)  # [1, 31]
+                    else:
+                        # A-RMA 모델인데 EX_OBS가 없으면 경고 (5초마다)
+                        if not hasattr(self, '_ex_obs_warn_time'):
+                            self._ex_obs_warn_time = time.time()
+                        if current_time - self._ex_obs_warn_time > 5.0:
+                            self.get_logger().warn("[POLICY] A-RMA model expects 31-dim observation but EX_OBS is not available. Make sure adaptation_module_node is running.")
+                            self._ex_obs_warn_time = current_time
+            elif self.expected_obs_dim == 23:
+                # Standard 모델: EX_OBS 제외
+                pass  # obs는 이미 23차원
+            else:
+                # 알 수 없는 차원
+                self.get_logger().warn(f"[POLICY] Unknown expected observation dimension: {self.expected_obs_dim}. Using 23-dim observation.")
             
             # Observation shape 확인 (첫 번째 실행 시)
             if self.mode == "AUTO::RUN" and not hasattr(self, '_obs_shape_logged'):
@@ -836,7 +908,9 @@ class BerkeleyControlNode(Node):
                         with torch.no_grad():
                             act = self.policy.act_inference(obs).squeeze()
                 except Exception as e:
-                    self.get_logger().error(f"[POLICY] Inference error: {e}", exc_info=True)
+                    import traceback
+                    self.get_logger().error(f"[POLICY] Inference error: {e}")
+                    self.get_logger().error(f"[POLICY] Traceback: {traceback.format_exc()}")
                     # 에러 발생 시 기본값 사용
                     act = torch.zeros(6, device=self.device)
 

@@ -1,4 +1,5 @@
 [console_scripts]
+adaptation_module_node = redshow_control.adaptation_module_node:main
 bno085_node = redshow_control.bno085_test_node:main
 bno085_test_node = redshow_control.bno085_test_node:main
 redshow_control_node = redshow_control.redshow_control_node:main
