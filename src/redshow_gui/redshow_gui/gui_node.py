@@ -1251,10 +1251,8 @@ class MonitorGUI(QMainWindow):
                         "font-size: 9pt; border-radius: 3px;"
                     )
                 else:
-                    if current_value is not None:
-                        label.setText(f"{name}: {current_value:.4f} None")
-                    else:
-                        label.setText(f"{name}: None")
+                    # Observation이 준비되지 않았을 때는 값 표시하지 않음 (3.14 같은 기본값 방지)
+                    label.setText(f"{name}: None")
                     label.setStyleSheet(
                         "padding: 3px 5px; background-color: #ff4444; color: white; "
                         "font-size: 9pt; border-radius: 3px;"

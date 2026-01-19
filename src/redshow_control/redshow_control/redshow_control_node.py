@@ -168,6 +168,11 @@ class BerkeleyControlNode(Node):
         self.policy_hz_start_time = time.time()
         self.current_policy_hz = 0.0
         
+        # Inference 시간 측정
+        self.inference_times = deque(maxlen=100)  # 최근 100개 inference 시간 저장
+        self.inference_time_sum = 0.0
+        self.inference_time_count = 0
+        
         # 통합 디버그 출력 (1초마다)
         self.debug_last_time = time.time()
         
@@ -884,6 +889,9 @@ class BerkeleyControlNode(Node):
                 self._obs_shape_logged = True
 
             if self.mode == "AUTO::RUN":
+                # Inference 시간 측정 시작
+                inference_start = time.perf_counter()
+                
                 try:
                     if self.is_onnx_model and self.onnx_session is not None:
                         # ONNX 모델 inference
@@ -913,6 +921,12 @@ class BerkeleyControlNode(Node):
                     self.get_logger().error(f"[POLICY] Traceback: {traceback.format_exc()}")
                     # 에러 발생 시 기본값 사용
                     act = torch.zeros(6, device=self.device)
+                
+                # Inference 시간 측정 종료 및 저장
+                inference_time = (time.perf_counter() - inference_start) * 1000.0  # ms 단위로 변환
+                self.inference_times.append(inference_time)
+                self.inference_time_sum += inference_time
+                self.inference_time_count += 1
 
                 # smoothing (policy-space)
                 self.smoothed_act = 0.2 * self.smoothed_act + 0.8 * act
@@ -1031,7 +1045,7 @@ class BerkeleyControlNode(Node):
         Auto 모드일 때 wheel은 30배 스케일 적용.
         """
         converted = torch.zeros(6, device=self.device)
-        wheel_scale = 30.0 if is_auto else 1.0
+        wheel_scale = 21.0 if is_auto else 1.0
         # wheel: 부호 반전 후 Auto일 때 30배, Manual일 때 그대로, -30~30 범위로 클램프
         converted[0] = torch.clamp(-act[0] * wheel_scale, -30.0, 30.0)  # wheel_L
         converted[1] = torch.clamp(-act[1] * wheel_scale, -30.0, 30.0)  # wheel_R
@@ -1087,6 +1101,14 @@ class BerkeleyControlNode(Node):
         # Policy Hz (AUTO 모드일 때만)
         hz_str = f"Hz:{self.current_policy_hz:.1f}" if self.mode == "AUTO::RUN" else ""
         
+        # Inference 시간 통계 (AUTO 모드일 때만)
+        inference_str = ""
+        if self.mode == "AUTO::RUN" and len(self.inference_times) > 0:
+            avg_inference = sum(self.inference_times) / len(self.inference_times)
+            min_inference = min(self.inference_times)
+            max_inference = max(self.inference_times)
+            inference_str = f" | Inf: {avg_inference:.2f}ms (min:{min_inference:.2f}, max:{max_inference:.2f})"
+        
         # 루프 주기 측정 (실제 Hz)
         obs_hz = 0.0
         ctrl_hz = 0.0
@@ -1106,6 +1128,8 @@ class BerkeleyControlNode(Node):
         status_line = f"[DEBUG] Mode: {self.mode:12s} | Serial: {serial_str} | Obs: {obs_status} {obs_str}({obs_hz:.1f}Hz) | BNO085: {bno085_str}"
         if hz_str:
             status_line += f" | {hz_str}"
+        if inference_str:
+            status_line += inference_str
         status_line += f" | ACT: {act_str} | Ctrl: {ctrl_hz:.1f}Hz"
         
         self.get_logger().info(status_line)
@@ -1203,7 +1227,7 @@ class BerkeleyControlNode(Node):
         # self.current_act는 firmware-space이므로 policy-space로 변환 필요
         # convert_act의 역변환: wheel은 부호 반전 후 스케일 제거, leg는 PI 제거
         is_auto = self.mode == "AUTO::RUN"
-        wheel_scale = 30.0 if is_auto else 1.0
+        wheel_scale = 21.5 if is_auto else 1.0
         policy_act = torch.zeros(6, device=self.device)
         policy_act[0] = -self.current_act[0] / wheel_scale  # wheel_L 역변환
         policy_act[1] = -self.current_act[1] / wheel_scale  # wheel_R 역변환
