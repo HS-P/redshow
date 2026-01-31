@@ -88,7 +88,6 @@ class ROS2Node(Node):
         self.joint_pub = self.create_publisher(Float64MultiArray, 'redshow/joint_cmd', 10)
         self.velocity_command_pub = self.create_publisher(Float64MultiArray, 'redshow/velocity_command', 10)
         self.model_path_pub = self.create_publisher(String, 'redshow/model_path', 10)
-        self.jump_mode_pub = self.create_publisher(Float64MultiArray, 'redshow/jump_mode', 10)
         # 개별 Observation 토픽 구독자
         self.leg_position_sub = None
         self.wheel_velocity_sub = None
@@ -126,12 +125,6 @@ class ROS2Node(Node):
         msg = String()
         msg.data = model_path
         self.model_path_pub.publish(msg)
-    
-    def publish_jump_mode(self, jump_mode):
-        """점프 모드 발행 (0: Driving, 1: Jumping)"""
-        msg = Float64MultiArray()
-        msg.data = [float(jump_mode)]
-        self.jump_mode_pub.publish(msg)
     
     def setup_feedback_subscribers(self, callbacks):
         """개별 Observation 토픽 구독 설정"""
@@ -214,10 +207,8 @@ class MonitorGUI(QMainWindow):
         self.selected_mode_btn = None
         self.current_file_path = None
         
-        # ---- Dual Policy (Jump/Driving) ----
+        # ---- Policy ----
         self.driving_policy_path = None
-        self.jumping_policy_path = None
-        self.jump_mode = 0  # 0: Driving, 1: Jumping
         
         # ---- Observation 상태 ----
         self.obs_ready = False
@@ -242,6 +233,10 @@ class MonitorGUI(QMainWindow):
         self.time_buffer = deque(maxlen=self.max_history)
         self.obs_buffer = {}  # 각 observation별 버퍼
         self.act_buffer = deque(maxlen=self.max_history)
+        
+        # 시간 추적 (그래프용)
+        self.graph_start_time = None  # 그래프 시작 시간
+        self.last_time_buffer_update = None  # 마지막 time_buffer 업데이트 시간
         
         # Velocity commands (GUI에서 설정)
         self.velocity_commands = [0.0, 0.0, 0.0, 0.0]
@@ -301,9 +296,6 @@ class MonitorGUI(QMainWindow):
         self.hz_timer.start(1000)  # 1초마다
 
         self.init_ui()
-        
-        # 초기 점프 모드 발행
-        self.ros2_node.publish_jump_mode(self.jump_mode)
 
     # =========================
     # ROS
@@ -381,6 +373,10 @@ class MonitorGUI(QMainWindow):
             self.obs_ready = True
             self.last_obs_time = current_time
             
+            # 그래프 시작 시간 초기화 (첫 데이터 수신 시)
+            if self.graph_start_time is None:
+                self.graph_start_time = current_time
+            
             # 전체 Hz 계산
             if hasattr(self, '_prev_obs_time') and self._prev_obs_time is not None:
                 dt = current_time - self._prev_obs_time
@@ -389,9 +385,14 @@ class MonitorGUI(QMainWindow):
                     if 0 < hz < 1000:
                         self.obs_hz_buffer.append(hz)
             self._prev_obs_time = current_time
+            
+            # time_buffer 업데이트 (실제 경과 시간 저장)
+            # 중복 방지: 같은 시간대(0.01초 이내)에는 한 번만 추가
+            elapsed_time = current_time - self.graph_start_time
+            if self.last_time_buffer_update is None or (current_time - self.last_time_buffer_update) >= 0.01:
+                self.time_buffer.append(elapsed_time)
+                self.last_time_buffer_update = current_time
         
-        # time_buffer 업데이트
-        self.time_buffer.append(len(self.time_buffer))
         self.ros2_node.feedback_count += 1
     
     def show_warning(self, message: str, throttle_sec: float = 5.0):
@@ -523,7 +524,7 @@ class MonitorGUI(QMainWindow):
         file_group = QGroupBox("Model File (ONNX)")
         file_layout = QVBoxLayout()
         
-        # Policy 파일 선택 (Driving용, Jumping용)
+        # Policy 파일 선택
         policy_file_layout = QVBoxLayout()
         
         # Driving Policy 파일 선택
@@ -532,13 +533,6 @@ class MonitorGUI(QMainWindow):
         self.open_driving_file_btn.clicked.connect(self.open_driving_file_dialog)
         driving_layout.addWidget(self.open_driving_file_btn)
         policy_file_layout.addLayout(driving_layout)
-        
-        # Jumping Policy 파일 선택
-        jumping_layout = QHBoxLayout()
-        self.open_jumping_file_btn = QPushButton("Jumping ONNX 선택")
-        self.open_jumping_file_btn.clicked.connect(self.open_jumping_file_dialog)
-        jumping_layout.addWidget(self.open_jumping_file_btn)
-        policy_file_layout.addLayout(jumping_layout)
         
         file_layout.addLayout(policy_file_layout)
         
@@ -552,36 +546,6 @@ class MonitorGUI(QMainWindow):
             "font-weight: bold; font-size: 10pt; border-radius: 5px;"
         )
         file_layout.addWidget(self.driving_file_label)
-        
-        # Jumping Policy 파일 표시
-        self.jumping_file_label = QLabel("Jumping ONNX 파일이 선택되지 않았습니다.")
-        self.jumping_file_label.setWordWrap(True)
-        self.jumping_file_label.setAlignment(Qt.AlignCenter)
-        self.jumping_file_label.setMinimumHeight(40)
-        self.jumping_file_label.setStyleSheet(
-            "padding: 10px; background-color: #ff4444; color: white; "
-            "font-weight: bold; font-size: 10pt; border-radius: 5px;"
-        )
-        file_layout.addWidget(self.jumping_file_label)
-        
-        # 점프 모드 토글 및 상태 표시
-        jump_mode_layout = QHBoxLayout()
-        self.jump_mode_toggle_btn = QPushButton("점프 모드: OFF")
-        self.jump_mode_toggle_btn.setMinimumHeight(50)
-        self.jump_mode_toggle_btn.clicked.connect(self.toggle_jump_mode)
-        self.jump_mode_toggle_btn.setStyleSheet(
-            "background-color: #666; color: white; font-weight: bold; font-size: 12pt;"
-        )
-        jump_mode_layout.addWidget(self.jump_mode_toggle_btn)
-        
-        self.jump_mode_status_label = QLabel("현재 모드: Driving")
-        self.jump_mode_status_label.setAlignment(Qt.AlignCenter)
-        self.jump_mode_status_label.setStyleSheet(
-            "padding: 10px; background-color: #4A90E2; color: white; "
-            "font-weight: bold; font-size: 12pt; border-radius: 5px;"
-        )
-        jump_mode_layout.addWidget(self.jump_mode_status_label)
-        file_layout.addLayout(jump_mode_layout)
         
         # 기존 Policy 파일 표시 (하위 호환성 유지)
         self.current_file_label = QLabel("(레거시: 단일 파일 모드)")
@@ -735,7 +699,7 @@ class MonitorGUI(QMainWindow):
         w = QWidget()
         l = QVBoxLayout(w)
         
-        # Velocity Commands 입력 (모드에 따라 3차원 또는 4차원)
+        # Velocity Commands 입력 (4차원)
         vcmd_group = QGroupBox("Velocity Commands")
         vcmd_layout = QGridLayout()
         
@@ -760,9 +724,6 @@ class MonitorGUI(QMainWindow):
         
         vcmd_group.setLayout(vcmd_layout)
         l.addWidget(vcmd_group)
-        
-        # 초기 상태: Jumping 모드에 따라 Heading 숨기기
-        self.update_velocity_command_ui()
         
         # Action 입력
         manual_group = QGroupBox("Manual Action Input")
@@ -796,7 +757,7 @@ class MonitorGUI(QMainWindow):
         w = QWidget()
         l = QVBoxLayout(w)
         
-        # Velocity Commands 입력 (모드에 따라 3차원 또는 4차원)
+        # Velocity Commands 입력 (4차원)
         vcmd_group = QGroupBox("Velocity Commands")
         vcmd_layout = QGridLayout()
         
@@ -822,9 +783,6 @@ class MonitorGUI(QMainWindow):
         
         vcmd_group.setLayout(vcmd_layout)
         l.addWidget(vcmd_group)
-        
-        # 초기 상태: Jumping 모드에 따라 Heading 숨기기
-        self.update_velocity_command_ui()
         
         info_label = QLabel("Auto 모드에서는 Policy가 자동으로 Action을 생성합니다.\nVelocity Commands는 위에서 설정할 수 있습니다.")
         info_label.setAlignment(Qt.AlignCenter)
@@ -973,34 +931,6 @@ class MonitorGUI(QMainWindow):
                 "font-weight: bold; font-size: 10pt; border-radius: 5px;"
             )
     
-    def open_jumping_file_dialog(self):
-        """Jumping ONNX 파일 열기 다이얼로그"""
-        file_path = self._open_onnx_file_dialog("Jumping ONNX 파일 선택")
-        if file_path:
-            self.jumping_policy_path = file_path
-            file_name = os.path.basename(file_path)
-            self.jumping_file_label.setText(f"Jumping ONNX:\n{file_name}")
-            self.jumping_file_label.setStyleSheet(
-                "padding: 10px; background-color: #50C878; color: white; "
-                "font-weight: bold; font-size: 10pt; border-radius: 5px;"
-            )
-            self.get_logger().info(f"Jumping ONNX file selected: {file_path}")
-            
-            # Control node에 모델 파일 경로를 실시간으로 전달
-            self.ros2_node.publish_model_path(f"JUMPING:{file_path}")
-            self.get_logger().info(f"Jumping model path published to control node: {file_path}")
-            
-            # 모델 파일 구조 확인
-            self.check_model_file_structure(file_path)
-        else:
-            # 파일 선택 취소 시
-            self.jumping_policy_path = None
-            self.jumping_file_label.setText("Jumping ONNX 파일이 선택되지 않았습니다.")
-            self.jumping_file_label.setStyleSheet(
-                "padding: 10px; background-color: #ff4444; color: white; "
-                "font-weight: bold; font-size: 10pt; border-radius: 5px;"
-            )
-    
     def _open_onnx_file_dialog(self, title):
         """ONNX 파일 열기 다이얼로그 헬퍼 함수"""
         # 기본 경로를 asset_vanilla로 설정
@@ -1022,58 +952,6 @@ class MonitorGUI(QMainWindow):
         )
         
         return file_path if file_path else None
-    
-    def toggle_jump_mode(self):
-        """점프 모드 토글 (0: Driving, 1: Jumping)"""
-        self.jump_mode = 1 - self.jump_mode  # 0 <-> 1 토글
-        
-        if self.jump_mode == 1:
-            self.jump_mode_toggle_btn.setText("점프 모드: ON")
-            self.jump_mode_toggle_btn.setStyleSheet(
-                "background-color: #FF6B6B; color: white; font-weight: bold; font-size: 12pt;"
-            )
-            self.jump_mode_status_label.setText("현재 모드: Jumping")
-            self.jump_mode_status_label.setStyleSheet(
-                "padding: 10px; background-color: #FF6B6B; color: white; "
-                "font-weight: bold; font-size: 12pt; border-radius: 5px;"
-            )
-        else:
-            self.jump_mode_toggle_btn.setText("점프 모드: OFF")
-            self.jump_mode_toggle_btn.setStyleSheet(
-                "background-color: #666; color: white; font-weight: bold; font-size: 12pt;"
-            )
-            self.jump_mode_status_label.setText("현재 모드: Driving")
-            self.jump_mode_status_label.setStyleSheet(
-                "padding: 10px; background-color: #4A90E2; color: white; "
-                "font-weight: bold; font-size: 12pt; border-radius: 5px;"
-            )
-        
-        # Velocity command UI 업데이트 (Heading 표시/숨김)
-        self.update_velocity_command_ui()
-        
-        # Control node에 점프 모드 전송
-        self.ros2_node.publish_jump_mode(self.jump_mode)
-        self.get_logger().info(f"Jump mode changed to: {self.jump_mode} ({'Jumping' if self.jump_mode == 1 else 'Driving'})")
-    
-    def update_velocity_command_ui(self):
-        """Velocity command UI 업데이트 (Jumping 모드일 때 Heading 숨김)"""
-        # Manual 탭
-        if hasattr(self, 'velocity_command_labels') and len(self.velocity_command_labels) >= 4:
-            if self.jump_mode == 1:  # Jumping 모드: Heading 숨김
-                self.velocity_command_labels[3].hide()
-                self.velocity_command_inputs[3].hide()
-            else:  # Driving 모드: Heading 표시
-                self.velocity_command_labels[3].show()
-                self.velocity_command_inputs[3].show()
-        
-        # Auto 탭
-        if hasattr(self, 'auto_velocity_command_labels') and len(self.auto_velocity_command_labels) >= 4:
-            if self.jump_mode == 1:  # Jumping 모드: Heading 숨김
-                self.auto_velocity_command_labels[3].hide()
-                self.auto_velocity_command_inputs[3].hide()
-            else:  # Driving 모드: Heading 표시
-                self.auto_velocity_command_labels[3].show()
-                self.auto_velocity_command_inputs[3].show()
     
     def open_file_dialog(self):
         """레거시 Policy 파일 열기 다이얼로그 (하위 호환성)"""
@@ -1228,16 +1106,8 @@ class MonitorGUI(QMainWindow):
         
         # RUN 버튼을 누를 때 검증
         if not self.is_running:  # RUN 시작 시
-            # 1. Dual Policy 모드: Driving과 Jumping ONNX 파일이 모두 선택되었는지 확인
-            if not self.driving_policy_path:
-                self.show_warning("경고: Driving ONNX 파일을 선택해주세요.")
-                return
-            if not self.jumping_policy_path:
-                self.show_warning("경고: Jumping ONNX 파일을 선택해주세요.")
-                return
-            
-            # 레거시 모드 확인 (하위 호환성)
-            if not self.driving_policy_path and not self.jumping_policy_path and not self.current_file_path:
+            # 1. Policy 파일이 선택되었는지 확인
+            if not self.driving_policy_path and not self.current_file_path:
                 self.show_warning("경고: Policy 파일을 선택해주세요.")
                 return
             
@@ -1321,13 +1191,10 @@ class MonitorGUI(QMainWindow):
                 zero_actions = [0.0] * 6
                 self.ros2_node.publish_joint_cmd(zero_actions)
         elif self.current_mode == "AUTO":
-            # Auto 모드에서 RUN 시작 시 velocity_command 전송 (모드에 따라 3차원 또는 4차원)
+            # Auto 모드에서 RUN 시작 시 velocity_command 전송 (4차원)
             if self.is_running:
                 if hasattr(self, 'auto_velocity_command_inputs'):
-                    if self.jump_mode == 1:  # Jumping 모드: 3차원만
-                        vcmd_vals = [self.auto_velocity_command_inputs[i].value() for i in range(3)]
-                    else:  # Driving 모드: 4차원
-                        vcmd_vals = [s.value() for s in self.auto_velocity_command_inputs]
+                    vcmd_vals = [s.value() for s in self.auto_velocity_command_inputs]
                     self.velocity_commands = vcmd_vals.copy()
                     self.ros2_node.publish_velocity_command(vcmd_vals)
         
@@ -1371,6 +1238,13 @@ class MonitorGUI(QMainWindow):
     def on_tab_changed(self, index):
         """탭 변경 시 그래프 타이머 시작/중지"""
         if index == 2:  # Graph 탭
+            # Graph 탭이 열릴 때 그래프 시작 시간 리셋 (새로운 그래프 시작)
+            self.graph_start_time = time.time()
+            # 기존 시간 버퍼와 데이터 버퍼 초기화 (선택사항 - 주석 처리하면 이전 데이터 유지)
+            # self.time_buffer.clear()
+            # for idx in self.obs_buffer:
+            #     self.obs_buffer[idx].clear()
+            
             # Graph 탭이 열릴 때 그래프 위젯 생성
             if self.obs_groups and len(self.obs_figs) == 0:
                 QTimer.singleShot(200, self.update_graph_widgets)  # 200ms 지연 후 업데이트
@@ -1391,22 +1265,16 @@ class MonitorGUI(QMainWindow):
             self.ros2_node.publish_joint_cmd(vals)
             self.act_buffer.append(vals.copy())
             
-            # Velocity command도 전송 및 저장 (모드에 따라 3차원 또는 4차원)
+            # Velocity command도 전송 및 저장 (4차원)
             if hasattr(self, 'velocity_command_inputs'):
-                if self.jump_mode == 1:  # Jumping 모드: 3차원만
-                    vcmd_vals = [self.velocity_command_inputs[i].value() for i in range(3)]
-                else:  # Driving 모드: 4차원
-                    vcmd_vals = [s.value() for s in self.velocity_command_inputs]
+                vcmd_vals = [s.value() for s in self.velocity_command_inputs]
                 self.velocity_commands = vcmd_vals.copy()
                 self.ros2_node.publish_velocity_command(vcmd_vals)
     
     def on_velocity_command_changed(self):
         """Velocity command 변경 시 호출 (Auto 모드)"""
         if hasattr(self, 'auto_velocity_command_inputs'):
-            if self.jump_mode == 1:  # Jumping 모드: 3차원만
-                vcmd_vals = [self.auto_velocity_command_inputs[i].value() for i in range(3)]
-            else:  # Driving 모드: 4차원
-                vcmd_vals = [s.value() for s in self.auto_velocity_command_inputs]
+            vcmd_vals = [s.value() for s in self.auto_velocity_command_inputs]
             self.velocity_commands = vcmd_vals.copy()
             self.ros2_node.publish_velocity_command(vcmd_vals)
 
@@ -1477,7 +1345,12 @@ class MonitorGUI(QMainWindow):
         if not self.obs_groups:
             return
         
+        # 시간 배열 생성 (초 단위)
         times = np.array(list(self.time_buffer))
+        time_len = len(times)
+        
+        if time_len == 0:
+            return
         
         for group_name, group_info in self.obs_groups.items():
             # 그래프가 생성되지 않았으면 건너뜀
@@ -1491,19 +1364,37 @@ class MonitorGUI(QMainWindow):
             for i, idx in enumerate(group_info['indices']):
                 if idx in self.obs_buffer and len(self.obs_buffer[idx]) > 0:
                     values = np.array(list(self.obs_buffer[idx]))
-                    min_len = min(len(times), len(values))
+                    value_len = len(values)
+                    
+                    # 시간 버퍼와 데이터 버퍼의 길이 맞추기
+                    min_len = min(time_len, value_len)
                     if min_len > 0:
+                        # 시간과 데이터를 같은 길이로 자르기
+                        # 뒤에서부터 min_len개만큼 가져오기 (최신 데이터)
+                        time_data = times[-min_len:] if time_len > min_len else times
+                        value_data = values[-min_len:] if value_len > min_len else values
+                        
                         # 데이터가 모두 0이 아닌지 확인
-                        if not np.allclose(values[:min_len], 0.0, atol=1e-6):
-                            lines[i].set_data(times[:min_len], values[:min_len])
+                        if not np.allclose(value_data, 0.0, atol=1e-6):
+                            lines[i].set_data(time_data, value_data)
                             data_exists = True
                         else:
                             # 데이터가 모두 0이면 빈 라인으로 표시
                             lines[i].set_data([], [])
+                    else:
+                        # 데이터가 없으면 빈 라인으로 표시
+                        lines[i].set_data([], [])
             
             if data_exists:
+                # 축 범위 재계산 및 자동 스케일링
                 ax.relim()
                 ax.autoscale_view()
+                # X축 레이블 설정 (시간)
+                ax.set_xlabel("Time (s)")
+                # Y축 레이블 설정
+                ax.set_ylabel("Value")
+                # 그리드 표시
+                ax.grid(True, alpha=0.3)
                 self.obs_canvases[group_name].draw()
             else:
                 # 데이터가 없으면 그래프를 초기화 상태로 유지

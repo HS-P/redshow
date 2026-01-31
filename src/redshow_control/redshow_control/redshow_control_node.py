@@ -33,7 +33,6 @@ class BerkeleyControlNode(Node):
         self.manual_sub = self.create_subscription(Float64MultiArray, 'redshow/joint_cmd', self.manual_callback, 10)
         self.velocity_command_sub = self.create_subscription(Float64MultiArray, 'redshow/velocity_command', self.velocity_command_callback, 10)
         self.model_path_sub = self.create_subscription(String, 'redshow/model_path', self.model_path_callback, 10)
-        self.jump_mode_sub = self.create_subscription(Float64MultiArray, 'redshow/jump_mode', self.jump_mode_callback, 10)
         
         # BNO085 IMU 개별 토픽 구독
         self.bno085_gyro_sub = self.create_subscription(Float64MultiArray, '/Redshow/Sensor/gyroscope', self.bno085_gyro_callback, 10)
@@ -70,7 +69,6 @@ class BerkeleyControlNode(Node):
         # 실제 적용할 Action Scale (Firmware Space)
         # 이 값이 학습 시와 다르면 Observation에서 보정 필요
         self.WHEEL_SCALE_DRIVE = 7.0  # Driving 모드 실제 적용 스케일
-        self.WHEEL_SCALE_JUMP  = 0.5  # Jumping 모드 실제 적용 스케일
         
         # Max wheel speed (rad/s)
         self.MAX_WHEEL_SPEED = 30.0
@@ -121,14 +119,10 @@ class BerkeleyControlNode(Node):
         # 모델의 예상 observation 차원 (기본값 23, 모델 로드 시 업데이트됨)
         self.expected_obs_dim = 23
         
-        # ONNX 모델 관련 변수 (Dual Policy: Driving + Jumping)
+        # ONNX 모델 관련 변수
         self.driving_onnx_session = None
-        self.jumping_onnx_session = None
         self.is_onnx_model = False
-        self.current_onnx_session = None  # 현재 사용 중인 세션 (점프 모드에 따라 선택)
-        
-        # 점프 모드 (0: Driving, 1: Jumping)
-        self.jump_mode = 0
+        self.current_onnx_session = None  # 현재 사용 중인 세션
 
         # 초기 모델 로드 (파일이 없어도 에러 없이 진행, GUI에서 선택할 때 로드)
         try:
@@ -162,9 +156,8 @@ class BerkeleyControlNode(Node):
         self.manual_act = torch.zeros(6, device=self.device)
         
         # Velocity command (from GUI, Manual/Auto 모두 사용)
-        # Driving 모드: 4차원 [vx, vy, vz, heading]
-        # Jumping 모드: 3차원 [vx, vy, vz]
-        self.velocity_command = torch.zeros(4, device=self.device)  # 최대 4차원으로 초기화
+        # 4차원 [vx, vy, vz, heading]
+        self.velocity_command = torch.zeros(4, device=self.device)
         
         # BNO085 IMU 데이터 (개별 토픽에서 받음)
         self.bno085_base_ang_vel = None  # [gyro_x, gyro_y, gyro_z]
@@ -313,14 +306,13 @@ class BerkeleyControlNode(Node):
 
     def velocity_command_callback(self, msg: Float64MultiArray):
         """Velocity command 콜백: Manual/Auto 모드 모두에서 사용
-        Driving 모드: 4차원 [vx, vy, vz, heading]
-        Jumping 모드: 3차원 [vx, vy, vz]
+        4차원 [vx, vy, vz, heading]
         """
         data = list(msg.data)
         
-        # 1) length check (3 또는 4 차원 허용)
-        if len(data) not in [3, 4]:
-            self.get_logger().warn(f"[VELOCITY_CMD] Invalid length: {len(data)} (expected 3 or 4). Ignoring.")
+        # 1) length check (4 차원)
+        if len(data) != 4:
+            self.get_logger().warn(f"[VELOCITY_CMD] Invalid length: {len(data)} (expected 4). Ignoring.")
             return
         
         # 2) finite check
@@ -330,40 +322,8 @@ class BerkeleyControlNode(Node):
             return
         
         # 3) Store velocity command
-        # 3차원이면 4차원으로 패딩 (heading = 0)
-        if len(arr) == 3:
-            arr_padded = np.append(arr, 0.0)  # heading = 0
-        else:
-            arr_padded = arr
-        
-        self.velocity_command = torch.tensor(arr_padded, dtype=torch.float32, device=self.device)
-        self.get_logger().debug(f"[VELOCITY_CMD] Received: {data} (mode: {'Jumping' if self.jump_mode == 1 else 'Driving'})")
-    
-    def jump_mode_callback(self, msg: Float64MultiArray):
-        """점프 모드 콜백 (0: Driving, 1: Jumping)"""
-        if len(msg.data) < 1:
-            return
-        
-        new_jump_mode = int(msg.data[0])
-        if new_jump_mode not in [0, 1]:
-            self.get_logger().warn(f"[JUMP_MODE] Invalid jump mode: {new_jump_mode} (expected 0 or 1). Ignoring.")
-            return
-        
-        old_mode = self.jump_mode
-        self.jump_mode = new_jump_mode
-        
-        # 현재 사용할 ONNX 세션 선택
-        if self.jump_mode == 1:  # Jumping 모드
-            self.current_onnx_session = self.jumping_onnx_session
-            mode_name = "Jumping"
-        else:  # Driving 모드
-            self.current_onnx_session = self.driving_onnx_session
-            mode_name = "Driving"
-        
-        if old_mode != new_jump_mode:
-            self.get_logger().info(f"[JUMP_MODE] Mode changed: {old_mode} -> {new_jump_mode} ({mode_name})")
-            if self.current_onnx_session is None:
-                self.get_logger().warn(f"[JUMP_MODE] {mode_name} ONNX model not loaded yet!")
+        self.velocity_command = torch.tensor(arr, dtype=torch.float32, device=self.device)
+        self.get_logger().debug(f"[VELOCITY_CMD] Received: {data}")
 
     def bno085_gyro_callback(self, msg: Float64MultiArray):
         """BNO085 Gyroscope 데이터 콜백"""
@@ -441,7 +401,7 @@ class BerkeleyControlNode(Node):
 
     def model_path_callback(self, msg: String):
         """모델 파일 경로 콜백: 실시간 모델 로딩
-        형식: "DRIVING:/path/to/driving.onnx" 또는 "JUMPING:/path/to/jumping.onnx"
+        형식: "DRIVING:/path/to/driving.onnx"
         또는 레거시: "/path/to/model.pt" 또는 "/path/to/model.onnx"
         """
         model_path = msg.data.strip()
@@ -450,13 +410,10 @@ class BerkeleyControlNode(Node):
             self.get_logger().warn("[MODEL] Empty model path received. Ignoring.")
             return
         
-        # Dual Policy 모드 확인 (DRIVING: 또는 JUMPING: 접두사)
+        # 모드 확인 (DRIVING: 접두사)
         if model_path.startswith("DRIVING:"):
             model_type = "DRIVING"
             actual_path = model_path[8:].strip()  # "DRIVING:" 제거
-        elif model_path.startswith("JUMPING:"):
-            model_type = "JUMPING"
-            actual_path = model_path[8:].strip()  # "JUMPING:" 제거
         else:
             # 레거시 모드: 단일 파일
             model_type = "LEGACY"
@@ -520,7 +477,7 @@ class BerkeleyControlNode(Node):
             self.get_logger().error(f"[MODEL] ONNX file detected but onnxruntime is not installed. Please install: pip install onnxruntime")
             return
         
-        # Dual Policy 모드 처리
+        # 모델 로드 처리
         if model_type == "DRIVING":
             # 같은 경로면 무시
             if resolved_path == getattr(self, 'driving_policy_path', None):
@@ -539,50 +496,14 @@ class BerkeleyControlNode(Node):
             try:
                 self.load_onnx_policy(resolved_path, model_type="DRIVING")
                 self.driving_policy_path = resolved_path
+                self.current_onnx_session = self.driving_onnx_session
                 self.get_logger().info(f"✓ Driving ONNX model loaded successfully: {resolved_path}")
-                
-                # 현재 점프 모드가 Driving이면 세션 업데이트
-                if self.jump_mode == 0:
-                    self.current_onnx_session = self.driving_onnx_session
                 
                 if was_auto_running:
                     self.get_logger().info("[MODEL] Driving model reloaded. Please press RUN button to resume AUTO mode.")
             except Exception as e:
                 import traceback
                 self.get_logger().error(f"[MODEL] Failed to load Driving model: {e}")
-                self.get_logger().error(f"[MODEL] Traceback: {traceback.format_exc()}")
-                if was_auto_running:
-                    self.get_logger().warn("[MODEL] Previous model remains active. AUTO mode stopped.")
-        
-        elif model_type == "JUMPING":
-            # 같은 경로면 무시
-            if resolved_path == getattr(self, 'jumping_policy_path', None):
-                self.get_logger().info(f"[MODEL] Same Jumping model path: {resolved_path}. Skipping reload.")
-                return
-            
-            self.get_logger().info(f"[MODEL] Loading Jumping ONNX model: {resolved_path}")
-            
-            # AUTO 모드 실행 중이면 일시 중지
-            was_auto_running = (self.mode == "AUTO::RUN")
-            if was_auto_running:
-                self.get_logger().info("[MODEL] Temporarily stopping AUTO mode for Jumping model reload...")
-                self.mode = "AUTO::STOP"
-                self.to_neutral()
-            
-            try:
-                self.load_onnx_policy(resolved_path, model_type="JUMPING")
-                self.jumping_policy_path = resolved_path
-                self.get_logger().info(f"✓ Jumping ONNX model loaded successfully: {resolved_path}")
-                
-                # 현재 점프 모드가 Jumping이면 세션 업데이트
-                if self.jump_mode == 1:
-                    self.current_onnx_session = self.jumping_onnx_session
-                
-                if was_auto_running:
-                    self.get_logger().info("[MODEL] Jumping model reloaded. Please press RUN button to resume AUTO mode.")
-            except Exception as e:
-                import traceback
-                self.get_logger().error(f"[MODEL] Failed to load Jumping model: {e}")
                 self.get_logger().error(f"[MODEL] Traceback: {traceback.format_exc()}")
                 if was_auto_running:
                     self.get_logger().warn("[MODEL] Previous model remains active. AUTO mode stopped.")
@@ -618,8 +539,8 @@ class BerkeleyControlNode(Node):
                     self.get_logger().warn("[MODEL] Previous model remains active. AUTO mode stopped.")
     
     def load_onnx_policy(self, model_path: str, model_type: str = "DRIVING"):
-        """ONNX 모델 로드 함수 (Dual Policy 지원)
-        model_type: "DRIVING" 또는 "JUMPING"
+        """ONNX 모델 로드 함수
+        model_type: "DRIVING"
         """
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"ONNX file not found: {model_path}")
@@ -653,19 +574,10 @@ class BerkeleyControlNode(Node):
         self.get_logger().info(f"[ONNX] Input shape: {input_shape}, Expected obs dim: {expected_obs_dim}")
         self.get_logger().info(f"[ONNX] Providers: {onnx_session.get_providers()}")
         
-        # 모델 타입에 따라 저장
-        if model_type == "DRIVING":
-            self.driving_onnx_session = onnx_session
-            self.is_onnx_model = True
-            # 현재 점프 모드가 Driving이면 세션 업데이트
-            if self.jump_mode == 0:
-                self.current_onnx_session = onnx_session
-        elif model_type == "JUMPING":
-            self.jumping_onnx_session = onnx_session
-            self.is_onnx_model = True
-            # 현재 점프 모드가 Jumping이면 세션 업데이트
-            if self.jump_mode == 1:
-                self.current_onnx_session = onnx_session
+        # 모델 저장
+        self.driving_onnx_session = onnx_session
+        self.is_onnx_model = True
+        self.current_onnx_session = onnx_session
         
         # 액션 초기화
         self.prev_act = torch.zeros(6, device=self.device)
@@ -687,7 +599,7 @@ class BerkeleyControlNode(Node):
                 providers.insert(0, 'CUDAExecutionProvider')
             
             onnx_session = ort.InferenceSession(model_path, providers=providers)
-            self.driving_onnx_session = onnx_session  # 레거시는 Driving으로 저장
+            self.driving_onnx_session = onnx_session
             self.current_onnx_session = onnx_session
             self.is_onnx_model = True
             
@@ -719,7 +631,6 @@ class BerkeleyControlNode(Node):
         # PT 파일인 경우
         self.is_onnx_model = False
         self.driving_onnx_session = None
-        self.jumping_onnx_session = None
         self.current_onnx_session = None
         
         ckpt = torch.load(model_path, map_location="cpu")
@@ -1000,7 +911,7 @@ class BerkeleyControlNode(Node):
             
             # 현재 적용 중인 Action Scale 확인
             if self.mode == "AUTO::RUN":
-                actual_action_scale = self.WHEEL_SCALE_JUMP if self.jump_mode == 1 else self.WHEEL_SCALE_DRIVE
+                actual_action_scale = self.WHEEL_SCALE_DRIVE
             else:
                 actual_action_scale = 1.0  # Manual 모드는 스케일 없음
             
@@ -1060,15 +971,11 @@ class BerkeleyControlNode(Node):
             self.prev_quat = quat.clone()
 
             # Velocity command 사용 (GUI에서 받은 값)
-            # Jumping 모드: 3차원 [vx, vy, vz], Driving 모드: 4차원 [vx, vy, vz, heading]
-            if self.jump_mode == 1:  # Jumping 모드: 3차원만 사용
-                vcmd = self.velocity_command[:3].clone()
-            else:  # Driving 모드: 4차원 사용
-                vcmd = self.velocity_command.clone()
+            # 4차원 [vx, vy, vz, heading]
+            vcmd = self.velocity_command.clone()
 
             # Observation 조립
-            # Driving: leg_pos(4) + wheel_vel(2) + base_ang(3) + vcmd(4) + quat(4) + prev_act(6) = 23
-            # Jumping: leg_pos(4) + wheel_vel(2) + base_ang(3) + vcmd(3) + quat(4) + prev_act(6) = 22
+            # leg_pos(4) + wheel_vel(2) + base_ang(3) + vcmd(4) + quat(4) + prev_act(6) = 23
             obs_base = torch.cat([leg_pos, wheel_vel, base_ang, vcmd, quat, self.prev_act])
             
             # EX_OBS 추가 (모델이 31차원을 기대하는 경우에만)
@@ -1112,9 +1019,8 @@ class BerkeleyControlNode(Node):
                         output_name = self.current_onnx_session.get_outputs()[0].name
                         
                         # 첫 번째 inference 시 로그 출력
-                        mode_name = "Jumping" if self.jump_mode == 1 else "Driving"
                         if not hasattr(self, '_onnx_first_inference'):
-                            self.get_logger().info(f"[POLICY] {mode_name} ONNX inference: input_shape={obs_np.shape}, input_name={input_name}, output_name={output_name}")
+                            self.get_logger().info(f"[POLICY] ONNX inference: input_shape={obs_np.shape}, input_name={input_name}, output_name={output_name}")
                             self._onnx_first_inference = True
                         
                         outputs = self.current_onnx_session.run([output_name], {input_name: obs_np})
@@ -1122,15 +1028,14 @@ class BerkeleyControlNode(Node):
                         
                         # 첫 번째 action 생성 시 로그 출력
                         if not hasattr(self, '_onnx_first_action'):
-                            self.get_logger().info(f"[POLICY] {mode_name} ONNX action generated: {act.tolist()}")
+                            self.get_logger().info(f"[POLICY] ONNX action generated: {act.tolist()}")
                             self._onnx_first_action = True
                     elif self.is_onnx_model and self.current_onnx_session is None:
                         # ONNX 모드인데 세션이 없으면 경고
-                        mode_name = "Jumping" if self.jump_mode == 1 else "Driving"
                         if not hasattr(self, '_onnx_session_warn_time'):
                             self._onnx_session_warn_time = time.time()
                         if current_time - self._onnx_session_warn_time > 5.0:
-                            self.get_logger().warn(f"[POLICY] {mode_name} ONNX model not loaded. Please load {mode_name} ONNX file.")
+                            self.get_logger().warn(f"[POLICY] ONNX model not loaded. Please load ONNX file.")
                             self._onnx_session_warn_time = current_time
                         act = torch.zeros(6, device=self.device)
                     else:
@@ -1269,9 +1174,9 @@ class BerkeleyControlNode(Node):
         """
         converted = torch.zeros(6, device=self.device)
         
-        # AUTO에서만 jump/drive 스케일 분기
+        # AUTO에서만 스케일 적용
         if is_auto:
-            wheel_scale = self.WHEEL_SCALE_JUMP if self.jump_mode == 1 else self.WHEEL_SCALE_DRIVE
+            wheel_scale = self.WHEEL_SCALE_DRIVE
         else:
             wheel_scale = 1.0
         
@@ -1375,7 +1280,7 @@ class BerkeleyControlNode(Node):
                             base_ang: torch.Tensor, vcmd, 
                             quat: torch.Tensor, rpy: torch.Tensor, actions: torch.Tensor):
         """각 observation을 개별 토픽으로 publish
-        vcmd는 torch.Tensor 또는 list일 수 있음 (모드에 따라 3차원 또는 4차원)
+        vcmd는 torch.Tensor 또는 list일 수 있음 (4차원)
         """
         # LEG_POSITION (4개)
         msg_leg = Float64MultiArray()
@@ -1392,7 +1297,7 @@ class BerkeleyControlNode(Node):
         msg_ang.data = [base_ang[i].item() for i in range(3)]
         self.base_ang_vel_pub.publish(msg_ang)
         
-        # VELOCITY_COMMANDS (3개 또는 4개: 모드에 따라 다름)
+        # VELOCITY_COMMANDS (4개)
         msg_vcmd = Float64MultiArray()
         if isinstance(vcmd, (list, tuple)):
             # 리스트나 튜플인 경우
@@ -1460,7 +1365,7 @@ class BerkeleyControlNode(Node):
         
         # 현재 적용 중인 Action Scale 확인
         if self.mode == "AUTO::RUN":
-            actual_action_scale = self.WHEEL_SCALE_JUMP if self.jump_mode == 1 else self.WHEEL_SCALE_DRIVE
+            actual_action_scale = self.WHEEL_SCALE_DRIVE
         else:
             actual_action_scale = 1.0  # Manual 모드는 스케일 없음
         
@@ -1482,18 +1387,15 @@ class BerkeleyControlNode(Node):
                 quat = [1.0, 0.0, 0.0, 0.0]
         
         # Velocity command 사용 (GUI에서 받은 값)
-        # Jumping 모드: 3차원 [vx, vy, vz], Driving 모드: 4차원 [vx, vy, vz, heading]
-        if self.jump_mode == 1:  # Jumping 모드: 3차원만 사용
-            vcmd = [self.velocity_command[i].item() for i in range(3)]
-        else:  # Driving 모드: 4차원 사용
-            vcmd = [self.velocity_command[i].item() for i in range(4)]
+        # 4차원 [vx, vy, vz, heading]
+        vcmd = [self.velocity_command[i].item() for i in range(4)]
         
         # 실제로 전송된 Action을 policy-space로 역변환하여 사용
         # self.current_act는 firmware-space이므로 policy-space로 변환 필요
         # convert_act의 역변환: wheel은 부호 반전 후 스케일 제거, leg는 PI 제거
         is_auto = self.mode == "AUTO::RUN"
         if is_auto:
-            actual_action_scale = self.WHEEL_SCALE_JUMP if self.jump_mode == 1 else self.WHEEL_SCALE_DRIVE
+            actual_action_scale = self.WHEEL_SCALE_DRIVE
         else:
             actual_action_scale = 1.0
         
