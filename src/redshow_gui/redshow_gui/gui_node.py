@@ -88,6 +88,7 @@ class ROS2Node(Node):
         self.joint_pub = self.create_publisher(Float64MultiArray, 'redshow/joint_cmd', 10)
         self.velocity_command_pub = self.create_publisher(Float64MultiArray, 'redshow/velocity_command', 10)
         self.model_path_pub = self.create_publisher(String, 'redshow/model_path', 10)
+        self.jump_mode_pub = self.create_publisher(Float64MultiArray, 'redshow/jump_mode', 10)
         # 개별 Observation 토픽 구독자
         self.leg_position_sub = None
         self.wheel_velocity_sub = None
@@ -125,6 +126,12 @@ class ROS2Node(Node):
         msg = String()
         msg.data = model_path
         self.model_path_pub.publish(msg)
+    
+    def publish_jump_mode(self, jump_mode):
+        """점프 모드 발행 (0: Driving, 1: Jumping)"""
+        msg = Float64MultiArray()
+        msg.data = [float(jump_mode)]
+        self.jump_mode_pub.publish(msg)
     
     def setup_feedback_subscribers(self, callbacks):
         """개별 Observation 토픽 구독 설정"""
@@ -206,6 +213,11 @@ class MonitorGUI(QMainWindow):
         self.is_recording = False  # RECORD 상태 초기화
         self.selected_mode_btn = None
         self.current_file_path = None
+        
+        # ---- Dual Policy (Jump/Driving) ----
+        self.driving_policy_path = None
+        self.jumping_policy_path = None
+        self.jump_mode = 0  # 0: Driving, 1: Jumping
         
         # ---- Observation 상태 ----
         self.obs_ready = False
@@ -289,6 +301,9 @@ class MonitorGUI(QMainWindow):
         self.hz_timer.start(1000)  # 1초마다
 
         self.init_ui()
+        
+        # 초기 점프 모드 발행
+        self.ros2_node.publish_jump_mode(self.jump_mode)
 
     # =========================
     # ROS
@@ -505,52 +520,80 @@ class MonitorGUI(QMainWindow):
         l.setSpacing(10)
         
         # 파일 열기 버튼
-        file_group = QGroupBox("Model File")
+        file_group = QGroupBox("Model File (ONNX)")
         file_layout = QVBoxLayout()
         
-        # Policy 파일 선택
-        policy_file_layout = QHBoxLayout()
-        self.open_file_btn = QPushButton("Policy 파일 선택")
-        self.open_file_btn.clicked.connect(self.open_file_dialog)
-        policy_file_layout.addWidget(self.open_file_btn)
+        # Policy 파일 선택 (Driving용, Jumping용)
+        policy_file_layout = QVBoxLayout()
         
-        # A-RMA 파일 선택
-        self.open_arma_file_btn = QPushButton("A-RMA 파일 선택")
-        self.open_arma_file_btn.clicked.connect(self.open_arma_file_dialog)
-        policy_file_layout.addWidget(self.open_arma_file_btn)
+        # Driving Policy 파일 선택
+        driving_layout = QHBoxLayout()
+        self.open_driving_file_btn = QPushButton("Driving ONNX 선택")
+        self.open_driving_file_btn.clicked.connect(self.open_driving_file_dialog)
+        driving_layout.addWidget(self.open_driving_file_btn)
+        policy_file_layout.addLayout(driving_layout)
+        
+        # Jumping Policy 파일 선택
+        jumping_layout = QHBoxLayout()
+        self.open_jumping_file_btn = QPushButton("Jumping ONNX 선택")
+        self.open_jumping_file_btn.clicked.connect(self.open_jumping_file_dialog)
+        jumping_layout.addWidget(self.open_jumping_file_btn)
+        policy_file_layout.addLayout(jumping_layout)
         
         file_layout.addLayout(policy_file_layout)
         
-        # Policy 파일 표시
-        self.current_file_label = QLabel("현재 선택된 파일이 없습니다.")
+        # Driving Policy 파일 표시
+        self.driving_file_label = QLabel("Driving ONNX 파일이 선택되지 않았습니다.")
+        self.driving_file_label.setWordWrap(True)
+        self.driving_file_label.setAlignment(Qt.AlignCenter)
+        self.driving_file_label.setMinimumHeight(40)
+        self.driving_file_label.setStyleSheet(
+            "padding: 10px; background-color: #ff4444; color: white; "
+            "font-weight: bold; font-size: 10pt; border-radius: 5px;"
+        )
+        file_layout.addWidget(self.driving_file_label)
+        
+        # Jumping Policy 파일 표시
+        self.jumping_file_label = QLabel("Jumping ONNX 파일이 선택되지 않았습니다.")
+        self.jumping_file_label.setWordWrap(True)
+        self.jumping_file_label.setAlignment(Qt.AlignCenter)
+        self.jumping_file_label.setMinimumHeight(40)
+        self.jumping_file_label.setStyleSheet(
+            "padding: 10px; background-color: #ff4444; color: white; "
+            "font-weight: bold; font-size: 10pt; border-radius: 5px;"
+        )
+        file_layout.addWidget(self.jumping_file_label)
+        
+        # 점프 모드 토글 및 상태 표시
+        jump_mode_layout = QHBoxLayout()
+        self.jump_mode_toggle_btn = QPushButton("점프 모드: OFF")
+        self.jump_mode_toggle_btn.setMinimumHeight(50)
+        self.jump_mode_toggle_btn.clicked.connect(self.toggle_jump_mode)
+        self.jump_mode_toggle_btn.setStyleSheet(
+            "background-color: #666; color: white; font-weight: bold; font-size: 12pt;"
+        )
+        jump_mode_layout.addWidget(self.jump_mode_toggle_btn)
+        
+        self.jump_mode_status_label = QLabel("현재 모드: Driving")
+        self.jump_mode_status_label.setAlignment(Qt.AlignCenter)
+        self.jump_mode_status_label.setStyleSheet(
+            "padding: 10px; background-color: #4A90E2; color: white; "
+            "font-weight: bold; font-size: 12pt; border-radius: 5px;"
+        )
+        jump_mode_layout.addWidget(self.jump_mode_status_label)
+        file_layout.addLayout(jump_mode_layout)
+        
+        # 기존 Policy 파일 표시 (하위 호환성 유지)
+        self.current_file_label = QLabel("(레거시: 단일 파일 모드)")
         self.current_file_label.setWordWrap(True)
         self.current_file_label.setAlignment(Qt.AlignCenter)
-        self.current_file_label.setMinimumHeight(50)
+        self.current_file_label.setMinimumHeight(30)
         self.current_file_label.setStyleSheet(
-            "padding: 10px; background-color: #ff4444; color: white; "
-            "font-weight: bold; font-size: 11pt; border-radius: 5px;"
+            "padding: 5px; background-color: #888; color: white; "
+            "font-weight: normal; font-size: 9pt; border-radius: 5px;"
         )
         file_layout.addWidget(self.current_file_label)
         
-        # A-RMA 파일 표시
-        self.arma_file_label = QLabel("A-RMA 파일이 선택되지 않았습니다.")
-        self.arma_file_label.setWordWrap(True)
-        self.arma_file_label.setAlignment(Qt.AlignCenter)
-        self.arma_file_label.setMinimumHeight(50)
-        self.arma_file_label.setStyleSheet(
-            "padding: 10px; background-color: #666; color: white; "
-            "font-weight: bold; font-size: 11pt; border-radius: 5px;"
-        )
-        file_layout.addWidget(self.arma_file_label)
-        
-        # A-RMA 상태 표시
-        self.arma_status_label = QLabel("A-RMA: OFF")
-        self.arma_status_label.setAlignment(Qt.AlignCenter)
-        self.arma_status_label.setStyleSheet(
-            "padding: 10px; background-color: #666; color: white; "
-            "font-weight: bold; font-size: 12pt; border-radius: 5px;"
-        )
-        file_layout.addWidget(self.arma_status_label)
         
         # 경고 메시지 표시 영역
         self.warning_label = QLabel("")
@@ -692,11 +735,12 @@ class MonitorGUI(QMainWindow):
         w = QWidget()
         l = QVBoxLayout(w)
         
-        # Velocity Commands 입력
+        # Velocity Commands 입력 (모드에 따라 3차원 또는 4차원)
         vcmd_group = QGroupBox("Velocity Commands")
         vcmd_layout = QGridLayout()
         
         self.velocity_command_inputs = []
+        self.velocity_command_labels = []
         vcmd_names = ["Velocity X", "Velocity Y", "Velocity Z", "Heading"]
         
         for i, name in enumerate(vcmd_names):
@@ -712,9 +756,13 @@ class MonitorGUI(QMainWindow):
             vcmd_layout.addWidget(label, i, 0)
             vcmd_layout.addWidget(sb, i, 1)
             self.velocity_command_inputs.append(sb)
+            self.velocity_command_labels.append(label)
         
         vcmd_group.setLayout(vcmd_layout)
         l.addWidget(vcmd_group)
+        
+        # 초기 상태: Jumping 모드에 따라 Heading 숨기기
+        self.update_velocity_command_ui()
         
         # Action 입력
         manual_group = QGroupBox("Manual Action Input")
@@ -748,11 +796,12 @@ class MonitorGUI(QMainWindow):
         w = QWidget()
         l = QVBoxLayout(w)
         
-        # Velocity Commands 입력
+        # Velocity Commands 입력 (모드에 따라 3차원 또는 4차원)
         vcmd_group = QGroupBox("Velocity Commands")
         vcmd_layout = QGridLayout()
         
         self.auto_velocity_command_inputs = []
+        self.auto_velocity_command_labels = []
         vcmd_names = ["Velocity X", "Velocity Y", "Velocity Z", "Heading"]
         
         for i, name in enumerate(vcmd_names):
@@ -769,9 +818,13 @@ class MonitorGUI(QMainWindow):
             vcmd_layout.addWidget(label, i, 0)
             vcmd_layout.addWidget(sb, i, 1)
             self.auto_velocity_command_inputs.append(sb)
+            self.auto_velocity_command_labels.append(label)
         
         vcmd_group.setLayout(vcmd_layout)
         l.addWidget(vcmd_group)
+        
+        # 초기 상태: Jumping 모드에 따라 Heading 숨기기
+        self.update_velocity_command_ui()
         
         info_label = QLabel("Auto 모드에서는 Policy가 자동으로 Action을 생성합니다.\nVelocity Commands는 위에서 설정할 수 있습니다.")
         info_label.setAlignment(Qt.AlignCenter)
@@ -892,16 +945,70 @@ class MonitorGUI(QMainWindow):
     # =========================
     # BUTTON CALLBACKS
     # =========================
-    def open_file_dialog(self):
-        """Policy 파일 열기 다이얼로그"""
+    def open_driving_file_dialog(self):
+        """Driving ONNX 파일 열기 다이얼로그"""
+        file_path = self._open_onnx_file_dialog("Driving ONNX 파일 선택")
+        if file_path:
+            self.driving_policy_path = file_path
+            file_name = os.path.basename(file_path)
+            self.driving_file_label.setText(f"Driving ONNX:\n{file_name}")
+            self.driving_file_label.setStyleSheet(
+                "padding: 10px; background-color: #50C878; color: white; "
+                "font-weight: bold; font-size: 10pt; border-radius: 5px;"
+            )
+            self.get_logger().info(f"Driving ONNX file selected: {file_path}")
+            
+            # Control node에 모델 파일 경로를 실시간으로 전달
+            self.ros2_node.publish_model_path(f"DRIVING:{file_path}")
+            self.get_logger().info(f"Driving model path published to control node: {file_path}")
+            
+            # 모델 파일 구조 확인
+            self.check_model_file_structure(file_path)
+        else:
+            # 파일 선택 취소 시
+            self.driving_policy_path = None
+            self.driving_file_label.setText("Driving ONNX 파일이 선택되지 않았습니다.")
+            self.driving_file_label.setStyleSheet(
+                "padding: 10px; background-color: #ff4444; color: white; "
+                "font-weight: bold; font-size: 10pt; border-radius: 5px;"
+            )
+    
+    def open_jumping_file_dialog(self):
+        """Jumping ONNX 파일 열기 다이얼로그"""
+        file_path = self._open_onnx_file_dialog("Jumping ONNX 파일 선택")
+        if file_path:
+            self.jumping_policy_path = file_path
+            file_name = os.path.basename(file_path)
+            self.jumping_file_label.setText(f"Jumping ONNX:\n{file_name}")
+            self.jumping_file_label.setStyleSheet(
+                "padding: 10px; background-color: #50C878; color: white; "
+                "font-weight: bold; font-size: 10pt; border-radius: 5px;"
+            )
+            self.get_logger().info(f"Jumping ONNX file selected: {file_path}")
+            
+            # Control node에 모델 파일 경로를 실시간으로 전달
+            self.ros2_node.publish_model_path(f"JUMPING:{file_path}")
+            self.get_logger().info(f"Jumping model path published to control node: {file_path}")
+            
+            # 모델 파일 구조 확인
+            self.check_model_file_structure(file_path)
+        else:
+            # 파일 선택 취소 시
+            self.jumping_policy_path = None
+            self.jumping_file_label.setText("Jumping ONNX 파일이 선택되지 않았습니다.")
+            self.jumping_file_label.setStyleSheet(
+                "padding: 10px; background-color: #ff4444; color: white; "
+                "font-weight: bold; font-size: 10pt; border-radius: 5px;"
+            )
+    
+    def _open_onnx_file_dialog(self, title):
+        """ONNX 파일 열기 다이얼로그 헬퍼 함수"""
         # 기본 경로를 asset_vanilla로 설정
-        # __file__은 gui_node.py의 경로이므로, src 디렉토리로 올라가서 asset_vanilla 찾기
         src_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
         asset_vanilla_path = os.path.join(src_dir, 'asset_vanilla')
         
         # asset_vanilla가 없으면 상위 디렉토리에서 찾기
         if not os.path.exists(asset_vanilla_path):
-            # workspace root에서 찾기
             workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
             asset_vanilla_path = os.path.join(workspace_root, 'src', 'asset_vanilla')
         
@@ -909,7 +1016,80 @@ class MonitorGUI(QMainWindow):
         
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Policy 파일 선택",
+            title,
+            default_path,
+            "ONNX Files (*.onnx);;All Files (*)"
+        )
+        
+        return file_path if file_path else None
+    
+    def toggle_jump_mode(self):
+        """점프 모드 토글 (0: Driving, 1: Jumping)"""
+        self.jump_mode = 1 - self.jump_mode  # 0 <-> 1 토글
+        
+        if self.jump_mode == 1:
+            self.jump_mode_toggle_btn.setText("점프 모드: ON")
+            self.jump_mode_toggle_btn.setStyleSheet(
+                "background-color: #FF6B6B; color: white; font-weight: bold; font-size: 12pt;"
+            )
+            self.jump_mode_status_label.setText("현재 모드: Jumping")
+            self.jump_mode_status_label.setStyleSheet(
+                "padding: 10px; background-color: #FF6B6B; color: white; "
+                "font-weight: bold; font-size: 12pt; border-radius: 5px;"
+            )
+        else:
+            self.jump_mode_toggle_btn.setText("점프 모드: OFF")
+            self.jump_mode_toggle_btn.setStyleSheet(
+                "background-color: #666; color: white; font-weight: bold; font-size: 12pt;"
+            )
+            self.jump_mode_status_label.setText("현재 모드: Driving")
+            self.jump_mode_status_label.setStyleSheet(
+                "padding: 10px; background-color: #4A90E2; color: white; "
+                "font-weight: bold; font-size: 12pt; border-radius: 5px;"
+            )
+        
+        # Velocity command UI 업데이트 (Heading 표시/숨김)
+        self.update_velocity_command_ui()
+        
+        # Control node에 점프 모드 전송
+        self.ros2_node.publish_jump_mode(self.jump_mode)
+        self.get_logger().info(f"Jump mode changed to: {self.jump_mode} ({'Jumping' if self.jump_mode == 1 else 'Driving'})")
+    
+    def update_velocity_command_ui(self):
+        """Velocity command UI 업데이트 (Jumping 모드일 때 Heading 숨김)"""
+        # Manual 탭
+        if hasattr(self, 'velocity_command_labels') and len(self.velocity_command_labels) >= 4:
+            if self.jump_mode == 1:  # Jumping 모드: Heading 숨김
+                self.velocity_command_labels[3].hide()
+                self.velocity_command_inputs[3].hide()
+            else:  # Driving 모드: Heading 표시
+                self.velocity_command_labels[3].show()
+                self.velocity_command_inputs[3].show()
+        
+        # Auto 탭
+        if hasattr(self, 'auto_velocity_command_labels') and len(self.auto_velocity_command_labels) >= 4:
+            if self.jump_mode == 1:  # Jumping 모드: Heading 숨김
+                self.auto_velocity_command_labels[3].hide()
+                self.auto_velocity_command_inputs[3].hide()
+            else:  # Driving 모드: Heading 표시
+                self.auto_velocity_command_labels[3].show()
+                self.auto_velocity_command_inputs[3].show()
+    
+    def open_file_dialog(self):
+        """레거시 Policy 파일 열기 다이얼로그 (하위 호환성)"""
+        # 기본 경로를 asset_vanilla로 설정
+        src_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        asset_vanilla_path = os.path.join(src_dir, 'asset_vanilla')
+        
+        if not os.path.exists(asset_vanilla_path):
+            workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+            asset_vanilla_path = os.path.join(workspace_root, 'src', 'asset_vanilla')
+        
+        default_path = asset_vanilla_path if os.path.exists(asset_vanilla_path) else ""
+        
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Policy 파일 선택 (레거시)",
             default_path,
             "PyTorch Files (*.pt);;ONNX Files (*.onnx);;All Files (*)"
         )
@@ -917,27 +1097,25 @@ class MonitorGUI(QMainWindow):
         if file_path:
             self.current_file_path = file_path
             file_name = os.path.basename(file_path)
-            self.current_file_label.setText(f"Policy 파일:\n{file_name}")
+            self.current_file_label.setText(f"레거시 파일:\n{file_name}")
             self.current_file_label.setStyleSheet(
-                "padding: 10px; background-color: #50C878; color: white; "
-                "font-weight: bold; font-size: 11pt; border-radius: 5px;"
+                "padding: 5px; background-color: #888; color: white; "
+                "font-weight: normal; font-size: 9pt; border-radius: 5px;"
             )
-            self.get_logger().info(f"Policy file selected: {file_path}")
+            self.get_logger().info(f"Legacy policy file selected: {file_path}")
             
             # Control node에 모델 파일 경로를 실시간으로 전달
             self.ros2_node.publish_model_path(file_path)
             self.get_logger().info(f"Model path published to control node: {file_path}")
             
-            # 모델 파일 구조 확인 (로컬에서도 확인 가능하도록)
-            # 이 함수 내부에서 A-RMA 모델 여부도 확인함
+            # 모델 파일 구조 확인
             self.check_model_file_structure(file_path)
         else:
-            # 파일 선택 취소 시
             self.current_file_path = None
-            self.current_file_label.setText("현재 선택된 파일이 없습니다.")
+            self.current_file_label.setText("(레거시: 단일 파일 모드)")
             self.current_file_label.setStyleSheet(
-                "padding: 10px; background-color: #ff4444; color: white; "
-                "font-weight: bold; font-size: 11pt; border-radius: 5px;"
+                "padding: 5px; background-color: #888; color: white; "
+                "font-weight: normal; font-size: 9pt; border-radius: 5px;"
             )
     
     def open_arma_file_dialog(self):
@@ -1050,8 +1228,16 @@ class MonitorGUI(QMainWindow):
         
         # RUN 버튼을 누를 때 검증
         if not self.is_running:  # RUN 시작 시
-            # 1. Policy 파일이 선택되었는지 확인
-            if not self.current_file_path:
+            # 1. Dual Policy 모드: Driving과 Jumping ONNX 파일이 모두 선택되었는지 확인
+            if not self.driving_policy_path:
+                self.show_warning("경고: Driving ONNX 파일을 선택해주세요.")
+                return
+            if not self.jumping_policy_path:
+                self.show_warning("경고: Jumping ONNX 파일을 선택해주세요.")
+                return
+            
+            # 레거시 모드 확인 (하위 호환성)
+            if not self.driving_policy_path and not self.jumping_policy_path and not self.current_file_path:
                 self.show_warning("경고: Policy 파일을 선택해주세요.")
                 return
             
@@ -1135,10 +1321,13 @@ class MonitorGUI(QMainWindow):
                 zero_actions = [0.0] * 6
                 self.ros2_node.publish_joint_cmd(zero_actions)
         elif self.current_mode == "AUTO":
-            # Auto 모드에서 RUN 시작 시 velocity_command 전송
+            # Auto 모드에서 RUN 시작 시 velocity_command 전송 (모드에 따라 3차원 또는 4차원)
             if self.is_running:
                 if hasattr(self, 'auto_velocity_command_inputs'):
-                    vcmd_vals = [s.value() for s in self.auto_velocity_command_inputs]
+                    if self.jump_mode == 1:  # Jumping 모드: 3차원만
+                        vcmd_vals = [self.auto_velocity_command_inputs[i].value() for i in range(3)]
+                    else:  # Driving 모드: 4차원
+                        vcmd_vals = [s.value() for s in self.auto_velocity_command_inputs]
                     self.velocity_commands = vcmd_vals.copy()
                     self.ros2_node.publish_velocity_command(vcmd_vals)
         
@@ -1202,16 +1391,22 @@ class MonitorGUI(QMainWindow):
             self.ros2_node.publish_joint_cmd(vals)
             self.act_buffer.append(vals.copy())
             
-            # Velocity command도 전송 및 저장
+            # Velocity command도 전송 및 저장 (모드에 따라 3차원 또는 4차원)
             if hasattr(self, 'velocity_command_inputs'):
-                vcmd_vals = [s.value() for s in self.velocity_command_inputs]
+                if self.jump_mode == 1:  # Jumping 모드: 3차원만
+                    vcmd_vals = [self.velocity_command_inputs[i].value() for i in range(3)]
+                else:  # Driving 모드: 4차원
+                    vcmd_vals = [s.value() for s in self.velocity_command_inputs]
                 self.velocity_commands = vcmd_vals.copy()
                 self.ros2_node.publish_velocity_command(vcmd_vals)
     
     def on_velocity_command_changed(self):
         """Velocity command 변경 시 호출 (Auto 모드)"""
         if hasattr(self, 'auto_velocity_command_inputs'):
-            vcmd_vals = [s.value() for s in self.auto_velocity_command_inputs]
+            if self.jump_mode == 1:  # Jumping 모드: 3차원만
+                vcmd_vals = [self.auto_velocity_command_inputs[i].value() for i in range(3)]
+            else:  # Driving 모드: 4차원
+                vcmd_vals = [s.value() for s in self.auto_velocity_command_inputs]
             self.velocity_commands = vcmd_vals.copy()
             self.ros2_node.publish_velocity_command(vcmd_vals)
 
