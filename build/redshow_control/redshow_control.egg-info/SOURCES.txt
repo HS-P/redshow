@@ -12,7 +12,10 @@ launch/control.launch.py
 redshow_control/__init__.py
 redshow_control/adaptation_module_node.py
 redshow_control/bno085_test_node.py
+redshow_control/bno085_test_node_save.py
 redshow_control/redshow_control_node.py
+redshow_control/redshow_control_node_0225.py
+redshow_control/redshow_control_node_save.py
 redshow_control/test_adaptation_module_publisher.py
 redshow_control/test_feedback_publisher.py
 redshow_control.egg-info/PKG-INFO

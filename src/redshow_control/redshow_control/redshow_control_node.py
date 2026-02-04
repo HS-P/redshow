@@ -64,11 +64,13 @@ class BerkeleyControlNode(Node):
         
         # ────────────── Action Scale (Sim2Real 보정) ──────────────
         # 학습 시 사용된 Action Scale (Policy Space) - IsaacLab Simulation에서 사용된 값
-        self.ACTION_SCALE_POLICY = 6.0  # 학습 시 wheel action에 곱해진 스케일
+        self.ACTION_SCALE_POLICY = 10.0  # 학습 시 wheel action에 곱해진 스케일
         
         # 실제 적용할 Action Scale (Firmware Space)
         # 이 값이 학습 시와 다르면 Observation에서 보정 필요
-        self.WHEEL_SCALE_DRIVE = 7.0  # Driving 모드 실제 적용 스케일
+        self.WHEEL_SCALE_DRIVE_BASE = 16.0  # 저속용 기본 스케일
+        self.WHEEL_SCALE_DRIVE_HIGH = 24.0  # 고속용 스케일 (16 * 1.5)
+        self.WHEEL_SCALE_THRESHOLD = 30.0  # 고속 스케일 적용 임계값 (rad/s)
         
         # Max wheel speed (rad/s)
         self.MAX_WHEEL_SPEED = 30.0
@@ -144,7 +146,12 @@ class BerkeleyControlNode(Node):
         self.obs_buffer = deque(maxlen=4)
 
         self.prev_act = torch.zeros(6, device=self.device)
-        self.smoothed_act = torch.zeros(6, device=self.device)
+        
+        # ────────────── Leg Joint Limits (라디안) ──────────────
+        # 순서: [upper_L, upper_R, lower_L, lower_R]
+        # margin=0.01 rad 적용하여 보수적으로 클램프
+        self.LEG_MIN = torch.tensor([-0.8726646, -0.8726646, -1.0471976, -0.6108652], device=self.device) + 0.01
+        self.LEG_MAX = torch.tensor([0.6981317, 0.6981317, 0.6108652, 1.0471976], device=self.device) - 0.01
         
         # YAW unwrapping을 위한 이전 yaw 값 저장
         self.prev_yaw = None
@@ -581,7 +588,6 @@ class BerkeleyControlNode(Node):
         
         # 액션 초기화
         self.prev_act = torch.zeros(6, device=self.device)
-        self.smoothed_act = torch.zeros(6, device=self.device)
     
     def load_policy(self, model_path: str):
         """모델 로드 함수 (PT 또는 ONNX 지원) - 레거시 모드"""
@@ -624,7 +630,6 @@ class BerkeleyControlNode(Node):
             
             # 액션 초기화
             self.prev_act = torch.zeros(6, device=self.device)
-            self.smoothed_act = torch.zeros(6, device=self.device)
             
             return
         
@@ -718,7 +723,6 @@ class BerkeleyControlNode(Node):
         
         # 액션 초기화 (새 모델에 맞게)
         self.prev_act = torch.zeros(6, device=self.device)
-        self.smoothed_act = torch.zeros(6, device=self.device)
         
         # PT 파일 구조 확인 (Observation Group 정보가 있는지 확인)
         self.inspect_checkpoint_structure(ckpt, model_path)
@@ -891,7 +895,8 @@ class BerkeleyControlNode(Node):
 
             # 펌웨어에서 받은 데이터: 위치(4) + 휠 속도(2) = 6개만 사용
             # IMU 데이터는 BNO085에서 받음
-            avg = [sum(s[i] for s in self.obs_buffer) / len(self.obs_buffer) for i in range(16)]
+            # 가중 평균 적용: 최신 데이터에 높은 가중치 (6, 3, 2, 1)
+            avg = self.weighted_average_obs_buffer()
             (U_posL, U_posR, L_posL, L_posR, wL, wR,
              _, _, _, _, _, _, _, _, _, _) = avg  # OpenCR IMU 데이터는 사용하지 않음
 
@@ -909,9 +914,9 @@ class BerkeleyControlNode(Node):
             # Observation을 policy-space로 만들기 위해 ACTION_SCALE_POLICY / actual_scale을 곱해야 함
             wheel_vel_raw = torch.tensor([-wL, -wR], dtype=torch.float32, device=self.device)
             
-            # 현재 적용 중인 Action Scale 확인
+            # 현재 적용 중인 Action Scale 확인 (observation 역변환용으로는 기본 스케일 사용)
             if self.mode == "AUTO::RUN":
-                actual_action_scale = self.WHEEL_SCALE_DRIVE
+                actual_action_scale = self.WHEEL_SCALE_DRIVE_BASE  # 기본 스케일 사용
             else:
                 actual_action_scale = 1.0  # Manual 모드는 스케일 없음
             
@@ -1055,12 +1060,11 @@ class BerkeleyControlNode(Node):
                 self.inference_time_sum += inference_time
                 self.inference_time_count += 1
 
-                # smoothing (policy-space)
-                self.smoothed_act = 0.2 * self.smoothed_act + 0.8 * act
+                # smoothing 제거: act를 그대로 convert_act로 넘김
                 self.prev_act = act.clone()
 
                 # convert to firmware-space (Auto 모드이므로 wheel에 30배 적용)
-                self.current_act = self.convert_act(self.smoothed_act, is_auto=True)
+                self.current_act = self.convert_act(act, is_auto=True)
                 
                 # Policy Hz 계산 및 publish
                 self.policy_hz_counter += 1
@@ -1128,6 +1132,44 @@ class BerkeleyControlNode(Node):
     # ─────────────────────────────
     # Helpers
     # ─────────────────────────────
+    def weighted_average_obs_buffer(self):
+        """
+        obs_buffer의 데이터를 가중 평균으로 계산
+        가장 최신 데이터에 가중치 6, 그 다음 3, 2, 1 순으로 적용
+        총 가중치 합 = 12
+        """
+        if len(self.obs_buffer) == 0:
+            return [0.0] * 16
+        
+        # obs_buffer를 리스트로 변환 (deque는 append 순서 유지)
+        buffer_list = list(self.obs_buffer)
+        n = len(buffer_list)
+        
+        # 가중치: 가장 최신이 높은 가중치 (역순)
+        # buffer_list[-1]이 가장 최신, buffer_list[0]이 가장 오래된
+        weights = [6, 3, 2, 1]  # 최신부터 오래된 순서
+        
+        # 실제 버퍼 크기에 맞게 가중치 조정
+        if n == 1:
+            actual_weights = [6]
+        elif n == 2:
+            actual_weights = [3, 6]  # 오래된 것, 최신 것
+        elif n == 3:
+            actual_weights = [2, 3, 6]  # 오래된 것부터 최신 것
+        else:  # n == 4
+            actual_weights = [1, 2, 3, 6]  # 오래된 것부터 최신 것
+        
+        # 가중치 합 계산
+        weight_sum = sum(actual_weights)
+        
+        # 각 인덱스별로 가중 평균 계산
+        result = []
+        for i in range(16):
+            weighted_sum = sum(buffer_list[j][i] * actual_weights[j] for j in range(n))
+            result.append(weighted_sum / weight_sum)
+        
+        return result
+    
     def quaternion_to_rpy(self, quat: torch.Tensor) -> torch.Tensor:
         """
         Quaternion (w, x, y, z)을 Roll, Pitch, Yaw (RPY)로 변환
@@ -1171,32 +1213,59 @@ class BerkeleyControlNode(Node):
         Sim2Real 보정: 실제 적용할 Action Scale을 사용하여 변환
         0 input should map to NEUTRAL pose (upper/lower = PI).
         바퀴 속도 -0.3~0.3 범위는 DeadZone으로 처리 (역구동 Jerk 방지).
+        Leg joints는 policy-space(PI 더하기 전)에서 하드 클램프 적용.
+        
+        동적 Wheel Scale: 액션 크기에 따라 스케일 조정
+        - 기본 스케일: 16.0 (저속용)
+        - 16 * abs(action) > 5.0 rad/s이면 스케일 24.0 (고속용, 16 * 1.5)
         """
         converted = torch.zeros(6, device=self.device)
-        
-        # AUTO에서만 스케일 적용
-        if is_auto:
-            wheel_scale = self.WHEEL_SCALE_DRIVE
-        else:
-            wheel_scale = 1.0
         
         # DeadZone 적용: -0.2~0.2 범위는 0으로 처리 (Tensor 연산 사용)
         wheel_L_raw = act[0].clone()
         wheel_R_raw = act[1].clone()
         
-        # DeadZone: 절댓값이 0.3 이하이면 0으로 설정
-        wheel_L_raw = torch.where(torch.abs(wheel_L_raw) <= 0.3, torch.tensor(0.0, device=self.device), wheel_L_raw)
-        wheel_R_raw = torch.where(torch.abs(wheel_R_raw) <= 0.3, torch.tensor(0.0, device=self.device), wheel_R_raw)
+        # AUTO에서만 동적 스케일 적용
+        if is_auto:
+            # 각 wheel에 대해 개별적으로 스케일 결정
+            # 16 * abs(action) > 5.0이면 고속 스케일 적용
+            base_scale = self.WHEEL_SCALE_DRIVE_BASE
+            
+            # Left wheel 스케일 결정
+            speed_L = base_scale * torch.abs(wheel_L_raw)
+            scale_L = torch.where(
+                speed_L > self.WHEEL_SCALE_THRESHOLD,
+                self.WHEEL_SCALE_DRIVE_HIGH,  # 고속용 스케일
+                base_scale  # 저속용 기본 스케일
+            )
+            
+            # Right wheel 스케일 결정
+            speed_R = base_scale * torch.abs(wheel_R_raw)
+            scale_R = torch.where(
+                speed_R > self.WHEEL_SCALE_THRESHOLD,
+                self.WHEEL_SCALE_DRIVE_HIGH,  # 고속용 스케일
+                base_scale  # 저속용 기본 스케일
+            )
+            
+            # wheel: 부호 반전 후 동적 스케일 곱하기, MAX_WHEEL_SPEED로 클램프
+            converted[0] = torch.clamp(-wheel_L_raw * scale_L, -self.MAX_WHEEL_SPEED, self.MAX_WHEEL_SPEED)  # wheel_L
+            converted[1] = torch.clamp(-wheel_R_raw * scale_R, -self.MAX_WHEEL_SPEED, self.MAX_WHEEL_SPEED)  # wheel_R
+        else:
+            # Manual 모드: 스케일 없음
+            converted[0] = torch.clamp(-wheel_L_raw, -self.MAX_WHEEL_SPEED, self.MAX_WHEEL_SPEED)  # wheel_L
+            converted[1] = torch.clamp(-wheel_R_raw, -self.MAX_WHEEL_SPEED, self.MAX_WHEEL_SPEED)  # wheel_R
         
-        # wheel: 부호 반전 후 실제 적용 스케일 곱하기, MAX_WHEEL_SPEED로 클램프
-        converted[0] = torch.clamp(-wheel_L_raw * wheel_scale, -self.MAX_WHEEL_SPEED, self.MAX_WHEEL_SPEED)  # wheel_L
-        converted[1] = torch.clamp(-wheel_R_raw * wheel_scale, -self.MAX_WHEEL_SPEED, self.MAX_WHEEL_SPEED)  # wheel_R
+        # Leg joints: policy-space에서 하드 클램프 (PI 더하기 전)
+        # 순서: [upper_L, upper_R, lower_L, lower_R] = act[2:6]
+        leg = act[2:6].clone()
+        leg = torch.max(torch.min(leg, self.LEG_MAX), self.LEG_MIN)
+        
         # Manual Mode 기준: Action 방향과 실제 로봇 방향이 동일
         # Observation에서 부호 반전이 있는 부분은 Action에서도 동일하게 부호 반전 필요
-        converted[2] = act[2] + self.PI      # upper_L (변경 없음) - Observation[0]와 일치
-        converted[3] = -act[3] + self.PI     # upper_R (부호 반전) - Observation[1]와 일치
-        converted[4] = act[4] + self.PI      # lower_L (변경 없음) - Observation[2]와 일치
-        converted[5] = act[5] + self.PI      # lower_R (변경 없음) - Observation[3]와 일치
+        converted[2] = leg[0] + self.PI      # upper_L (변경 없음) - Observation[0]와 일치
+        converted[3] = -leg[1] + self.PI     # upper_R (부호 반전) - Observation[1]와 일치
+        converted[4] = leg[2] + self.PI      # lower_L (변경 없음) - Observation[2]와 일치
+        converted[5] = leg[3] + self.PI      # lower_R (변경 없음) - Observation[3]와 일치
         return converted
 
     def send_motor_cmd(self, act: torch.Tensor, log: bool = False):
@@ -1330,7 +1399,8 @@ class BerkeleyControlNode(Node):
         # obs_buffer가 비어있으면 0으로 채워진 데이터 publish
         # (GUI에서 Observation Status가 "None"으로 표시되도록)
         if len(self.obs_buffer) >= 1:
-            avg = [sum(s[i] for s in self.obs_buffer) / len(self.obs_buffer) for i in range(16)]
+            # 가중 평균 적용: 최신 데이터에 높은 가중치 (6, 3, 2, 1)
+            avg = self.weighted_average_obs_buffer()
         else:
             # obs_buffer가 비어있으면 0으로 채운 데이터 publish
             # 이렇게 하면 GUI에서 데이터가 없다는 것을 알 수 있음
@@ -1363,9 +1433,9 @@ class BerkeleyControlNode(Node):
         # Observation을 policy-space로 만들기 위해 ACTION_SCALE_POLICY / actual_scale을 곱해야 함
         wheel_vel_raw = [-wL, -wR]
         
-        # 현재 적용 중인 Action Scale 확인
+        # 현재 적용 중인 Action Scale 확인 (observation 역변환용으로는 기본 스케일 사용)
         if self.mode == "AUTO::RUN":
-            actual_action_scale = self.WHEEL_SCALE_DRIVE
+            actual_action_scale = self.WHEEL_SCALE_DRIVE_BASE  # 기본 스케일 사용
         else:
             actual_action_scale = 1.0  # Manual 모드는 스케일 없음
         
@@ -1393,9 +1463,10 @@ class BerkeleyControlNode(Node):
         # 실제로 전송된 Action을 policy-space로 역변환하여 사용
         # self.current_act는 firmware-space이므로 policy-space로 변환 필요
         # convert_act의 역변환: wheel은 부호 반전 후 스케일 제거, leg는 PI 제거
+        # 주의: 동적 스케일링이 적용되었지만 역변환 시에는 기본 스케일 사용 (근사치)
         is_auto = self.mode == "AUTO::RUN"
         if is_auto:
-            actual_action_scale = self.WHEEL_SCALE_DRIVE
+            actual_action_scale = self.WHEEL_SCALE_DRIVE_BASE  # 기본 스케일 사용 (근사치)
         else:
             actual_action_scale = 1.0
         

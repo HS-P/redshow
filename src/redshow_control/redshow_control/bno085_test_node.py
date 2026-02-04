@@ -36,6 +36,10 @@ class BNO085Node(Node):
         # YAW unwrapping을 위한 이전 yaw 값 저장
         self.prev_yaw = None
         
+        # Pitch 10도 앞으로 기울어진 오프셋 (라디안)
+        self.pitch_offset_deg = -21.0
+        self.pitch_offset_rad = math.radians(self.pitch_offset_deg)
+        
         # ROS2 Publisher: 개별 센서 데이터 발행
         self.accelerometer_pub = self.create_publisher(
             Float64MultiArray,
@@ -144,6 +148,26 @@ class BNO085Node(Node):
         
         return [roll, pitch, yaw]
     
+    def rpy_to_quaternion(self, roll, pitch, yaw):
+        """
+        Roll, Pitch, Yaw (RPY)를 Quaternion (i, j, k, real)로 변환
+        """
+        # 각각의 반각
+        cr = math.cos(roll * 0.5)
+        sr = math.sin(roll * 0.5)
+        cp = math.cos(pitch * 0.5)
+        sp = math.sin(pitch * 0.5)
+        cy = math.cos(yaw * 0.5)
+        sy = math.sin(yaw * 0.5)
+        
+        # 쿼터니언 계산 (ZYX 오일러 순서)
+        quat_real = cr * cp * cy + sr * sp * sy
+        quat_i = sr * cp * cy - cr * sp * sy
+        quat_j = cr * sp * cy + sr * cp * sy
+        quat_k = cr * cp * sy - sr * sp * cy
+        
+        return quat_i, quat_j, quat_k, quat_real
+    
     def read_sensor_data(self):
         """센서 데이터를 읽고 ROS2 토픽으로 발행"""
         try:
@@ -155,6 +179,16 @@ class BNO085Node(Node):
             
             # Quaternion을 RPY로 변환
             rpy = self.quaternion_to_rpy(quat_i, quat_j, quat_k, quat_real)
+            
+            # Pitch에 10도 오프셋 적용 (앞으로 기울어짐)
+            roll, pitch, yaw = rpy
+            pitch_offset = pitch + self.pitch_offset_rad
+            
+            # 오프셋이 적용된 RPY를 다시 쿼터니언으로 변환
+            quat_i, quat_j, quat_k, quat_real = self.rpy_to_quaternion(roll, pitch_offset, yaw)
+            
+            # 오프셋이 적용된 RPY 업데이트
+            rpy = [roll, pitch_offset, yaw]
             
             # 개별 센서 데이터 토픽 발행
             # Accelerometer
